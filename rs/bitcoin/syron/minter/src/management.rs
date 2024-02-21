@@ -61,6 +61,7 @@ pub enum Reason {
     /// The management canister rejected the signature request (not enough
     /// cycles, the ECDSA subnet is overloaded, etc.).
     Rejected(String),
+    Other(String)
 }
 
 impl fmt::Display for Reason {
@@ -71,7 +72,11 @@ impl fmt::Display for Reason {
             Self::CanisterError(msg) => write!(fmt, "canister error: {}", msg),
             Self::Rejected(msg) => {
                 write!(fmt, "the management canister rejected the call: {}", msg)
+            },
+            Self::Other(msg) => {
+                write!(fmt, " call rejected - reason: {}", msg)
             }
+
         }
     }
 }
@@ -82,7 +87,7 @@ impl Reason {
             RejectionCode::SysTransient => Self::QueueIsFull,
             RejectionCode::CanisterError => Self::CanisterError(reject_message),
             RejectionCode::CanisterReject => Self::Rejected(reject_message),
-            _ => Self::QueueIsFull,
+            _ => Self::Other(reject_message),
         }
     }
 }

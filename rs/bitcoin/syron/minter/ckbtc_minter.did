@@ -441,10 +441,6 @@ service : (minter_arg : MinterArg) -> {
     //   using [icrc2_approve] on the Syron Ledger.
     retrieve_btc_with_approval : (RetrieveBtcWithApprovalArgs) -> (variant { Ok : RetrieveBtcOk; Err : RetrieveBtcWithApprovalError });
 
-    /// [deprecated] Returns the status of a withdrawal request.
-    /// You should use retrieve_btc_status_v2 to retrieve the status of your withdrawal request.
-    retrieve_btc_status : (record { block_index : nat64 }) -> (RetrieveBtcStatus) query;
-
     /// Returns the status of a withdrawal request request using the RetrieveBtcStatusV2 type.
     retrieve_btc_status_v2 : (record { block_index : nat64 }) -> (RetrieveBtcStatusV2) query;
     
