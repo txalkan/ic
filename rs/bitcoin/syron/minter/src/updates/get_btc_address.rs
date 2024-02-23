@@ -13,16 +13,19 @@ use serde::Serialize;
 pub struct GetBtcAddressArgs {
     pub owner: Option<Principal>,
     pub subaccount: Option<Subaccount>,
+    
+    pub ssi: String
 }
 
 /// PRECONDITION: s.ecdsa_public_key.is_some()
-pub fn account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Account) -> String {
+pub fn account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Account, ssi: &str) -> String {
     crate::address::account_to_p2wpkh_address(
         s.btc_network,
         s.ecdsa_public_key
             .as_ref()
             .expect("bug: the ECDSA public key must be initialized"),
         account,
+        ssi
     )
 }
 
@@ -38,6 +41,7 @@ pub async fn get_btc_address(args: GetBtcAddressArgs) -> String {
                 owner,
                 subaccount: args.subaccount,
             },
+            &args.ssi
         )
     })
 }

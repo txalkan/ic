@@ -236,7 +236,7 @@ async fn submit_pending_requests() {
     };
 
     let ecdsa_public_key = updates::get_btc_address::init_ecdsa_public_key().await;
-    let main_address = address::account_to_bitcoin_address(&ecdsa_public_key, &main_account);
+    let main_address = address::account_to_bitcoin_address(&ecdsa_public_key, &main_account, ""); //@review ""
 
     let fee_millisatoshi_per_vbyte = match estimate_fee_per_vbyte().await {
         Some(fee) => fee,
@@ -340,11 +340,13 @@ async fn submit_pending_requests() {
 
         let txid = req.unsigned_tx.txid();
 
+        // @review
         match sign_transaction(
             req.key_name,
             &req.ecdsa_public_key,
             &req.outpoint_account,
             req.unsigned_tx,
+            ""
         )
         .await
         {
@@ -494,7 +496,8 @@ async fn finalize_requests() {
         subaccount: None,
     };
 
-    let main_address = address::account_to_bitcoin_address(&ecdsa_public_key, &main_account);
+    //@review
+    let main_address = address::account_to_bitcoin_address(&ecdsa_public_key, &main_account, "");//@review ""
     let new_utxos = fetch_main_utxos(&main_account, &main_address).await;
 
     // Transactions whose change outpoint is present in the newly fetched UTXOs
@@ -661,6 +664,7 @@ async fn finalize_requests() {
             &ecdsa_public_key,
             &outpoint_account,
             unsigned_tx,
+            ""//@review ""
         )
         .await;
 
@@ -831,6 +835,7 @@ pub async fn sign_transaction(
     ecdsa_public_key: &ECDSAPublicKey,
     output_account: &BTreeMap<tx::OutPoint, Account>,
     unsigned_tx: tx::UnsignedTransaction,
+    ssi: &str
 ) -> Result<tx::SignedTransaction, management::CallError> {
     use crate::address::{derivation_path, derive_public_key};
 
@@ -843,8 +848,8 @@ pub async fn sign_transaction(
             .get(outpoint)
             .unwrap_or_else(|| panic!("bug: no account for outpoint {:?}", outpoint));
 
-        let path = derivation_path(account);
-        let pubkey = ByteBuf::from(derive_public_key(ecdsa_public_key, account).public_key);
+        let path = derivation_path(account, ssi);
+        let pubkey = ByteBuf::from(derive_public_key(ecdsa_public_key, account, ssi).public_key);
         let pkhash = tx::hash160(&pubkey);
 
         let sighash = sighasher.sighash(input, &pkhash);

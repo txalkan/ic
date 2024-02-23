@@ -287,7 +287,7 @@ pub fn build_metadata() -> String {
             s.ecdsa_public_key
                 .clone()
                 .map(|key| {
-                    address::account_to_bitcoin_address(&key, &main_account).display(s.btc_network)
+                    address::account_to_bitcoin_address(&key, &main_account, "").display(s.btc_network) //@review ""
                 })
                 .unwrap_or_default(),
             s.min_confirmations,

@@ -33,6 +33,8 @@ pub struct RetrieveBtcArgs {
 
     // address where to send bitcoins
     pub address: String,
+
+    pub ssi: String
 }
 
 /// The arguments of the [retrieve_btc_with_approval] endpoint.
@@ -46,6 +48,8 @@ pub struct RetrieveBtcWithApprovalArgs {
 
     // The subaccount to burn ckBTC from.
     pub from_subaccount: Option<Subaccount>,
+
+    pub ssi: String
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -167,6 +171,7 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
             owner: ic_cdk::id(),
             subaccount: None,
         },
+        &args.ssi
     );
 
     if args.address == main_address.display(state::read_state(|s| s.btc_network)) {
@@ -301,6 +306,7 @@ pub async fn retrieve_btc_with_approval(
             owner: ic_cdk::id(),
             subaccount: None,
         },
+        &args.ssi
     );
 
     if args.address == main_address.display(state::read_state(|s| s.btc_network)) {

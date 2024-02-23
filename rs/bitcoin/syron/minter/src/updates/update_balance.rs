@@ -31,6 +31,8 @@ pub struct UpdateBalanceArgs {
     pub owner: Option<Principal>,
     /// The desired subaccount on the ledger, if any.
     pub subaccount: Option<Subaccount>,
+
+    pub ssi: String
 }
 
 /// The outcome of UTXO processing.
@@ -144,7 +146,7 @@ pub async fn update_balance(
     };
 
     let address = state::read_state(|s| {
-        get_btc_address::account_to_p2wpkh_address_from_state(s, &caller_account)
+        get_btc_address::account_to_p2wpkh_address_from_state(s, &caller_account, &args.ssi)
     });
 
     let (btc_network, min_confirmations) =
@@ -212,7 +214,7 @@ pub async fn update_balance(
         _ => "ckTESTBTC",
     };
 
-    let kyt_fee = read_state(|s| s.kyt_fee);
+    let kyt_fee = 0;//read_state(|s| s.kyt_fee);
     let mut utxo_statuses: Vec<UtxoStatus> = vec![];
     for utxo in new_utxos {
         if utxo.value <= kyt_fee {
@@ -227,14 +229,16 @@ pub async fn update_balance(
             utxo_statuses.push(UtxoStatus::ValueTooSmall(utxo));
             continue;
         }
-        let (uuid, status, kyt_provider) = kyt_check_utxo(caller_account.owner, &utxo).await?;
-        mutate_state(|s| {
-            crate::state::audit::mark_utxo_checked(s, &utxo, uuid.clone(), status, kyt_provider);
-        });
-        if status == UtxoCheckStatus::Tainted {
-            utxo_statuses.push(UtxoStatus::Tainted(utxo.clone()));
-            continue;
-        }
+        // let (uuid, status, kyt_provider) = kyt_check_utxo(caller_account.owner, &utxo).await?;
+        
+        // @review state change implications
+        // mutate_state(|s| {
+        //     crate::state::audit::mark_utxo_checked(s, &utxo, uuid.clone(), status, kyt_provider);
+        // });
+        // if status == UtxoCheckStatus::Tainted {
+        //     utxo_statuses.push(UtxoStatus::Tainted(utxo.clone()));
+        //     continue;
+        // }
         let amount = utxo.value - kyt_fee;
         let memo = MintMemo::Convert {
             txid: Some(utxo.outpoint.txid.as_ref()),
@@ -267,7 +271,7 @@ pub async fn update_balance(
             Err(err) => {
                 log!(
                     P0,
-                    "Failed to mint ckBTC for UTXO {}: {:?}",
+                    "Failed to mint SU$D for UTXO {}: {:?}",
                     DisplayOutpoint(&utxo.outpoint),
                     err
                 );

@@ -89,22 +89,23 @@ impl BitcoinAddress {
 
 /// Returns the derivation path that should be used to sign a message from a
 /// specified account.
-pub fn derivation_path(account: &Account) -> Vec<ByteBuf> {
+pub fn derivation_path(account: &Account, ssi: &str ) -> Vec<ByteBuf> {
     const SCHEMA_V1: u8 = 1;
     vec![
         ByteBuf::from(vec![SCHEMA_V1]),
         ByteBuf::from(account.owner.as_slice().to_vec()),
         ByteBuf::from(account.effective_subaccount().to_vec()),
+        ByteBuf::from(ssi.to_string().into_bytes().to_vec())
     ]
 }
 
 /// Returns a valid extended BIP-32 derivation path from an Account (Principal + subaccount)
-pub fn derive_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Account) -> ECDSAPublicKey {
+pub fn derive_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Account, ssi: &str) -> ECDSAPublicKey {
     let ExtendedBip32DerivationOutput {
         derived_public_key,
         derived_chain_code,
     } = DerivationPath::new(
-        derivation_path(account)
+        derivation_path(account, ssi)
             .into_iter()
             .map(|x| DerivationIndex(x.into_vec()))
             .collect(),
@@ -123,10 +124,11 @@ pub fn account_to_p2wpkh_address(
     network: Network,
     ecdsa_public_key: &ECDSAPublicKey,
     account: &Account,
+    ssi: &str
 ) -> String {
     network_and_public_key_to_p2wpkh(
         network,
-        &derive_public_key(ecdsa_public_key, account).public_key,
+        &derive_public_key(ecdsa_public_key, account, ssi).public_key,
     )
 }
 
@@ -134,8 +136,10 @@ pub fn account_to_p2wpkh_address(
 pub fn account_to_bitcoin_address(
     ecdsa_public_key: &ECDSAPublicKey,
     account: &Account,
+    ssi: &str
 ) -> BitcoinAddress {
-    let pk = derive_public_key(ecdsa_public_key, account).public_key;
+    // @review use of ""
+    let pk = derive_public_key(ecdsa_public_key, account, ssi).public_key;
     BitcoinAddress::P2wpkhV0(crate::tx::hash160(&pk))
 }
 
