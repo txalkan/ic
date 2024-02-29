@@ -59,8 +59,11 @@ pub struct InitArgs {
     /// Minimum amount of bitcoin that can be retrieved
     pub retrieve_btc_min_amount: u64,
 
-    /// The CanisterId of the ckBTC Ledger
+    /// The CanisterId of the BTC Syron Ledger
     pub ledger_id: CanisterId,
+
+    /// The CanisterId of the SU$D Syron Ledger
+    pub susd_id: CanisterId,
 
     /// Maximum time in nanoseconds that a transaction should spend in the queue
     /// before being sent.

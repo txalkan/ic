@@ -160,11 +160,16 @@ type InitArgs = record {
     // The minter will interact with this Bitcoin network.
     btc_network : BtcNetwork;
 
-    // The principal of the Syron Ledger that handles SU$D transfers.
+    // The principal of the Syron Ledger that handles BTC transfers.
     // The default account of the Syron Minter must be configured as
     // the minting account of the ledger.
     ledger_id : principal;
-
+    
+    // The principal of the Syron Ledger that handles SU$D transfers.
+    // The default account of the Syron Minter must be configured as
+    // the minting account of the ledger.
+    susd_id : principal;
+    
     // The name of the ECDSA key to use.
     // E.g., "dfx_test_key" on the local replica.
     ecdsa_key_name : text;

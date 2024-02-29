@@ -439,6 +439,7 @@ fn finalized_txids(candidates: &[state::SubmittedBtcTransaction], new_utxos: &[U
         .collect()
 }
 
+// @review(kyt)
 async fn reimburse_failed_kyt() {
     let try_to_reimburse = state::read_state(|s| s.pending_reimbursements.clone());
     for (burn_block_index, entry) in try_to_reimburse {

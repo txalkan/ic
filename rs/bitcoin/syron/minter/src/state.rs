@@ -329,8 +329,11 @@ pub struct CkBtcMinterState {
     /// The total amount of ckBTC burned.
     pub tokens_burned: u64,
 
-    /// The CanisterId of the ckBTC Ledger.
+    /// The CanisterId of the BTC Syron Ledger.
     pub ledger_id: CanisterId,
+
+    /// The CanisterId of the SU$D Syron Ledger.
+    pub susd_id: CanisterId,
 
     /// The principal of the KYT canister.
     pub kyt_principal: Option<CanisterId>,
@@ -422,6 +425,7 @@ impl CkBtcMinterState {
             ecdsa_key_name,
             retrieve_btc_min_amount,
             ledger_id,
+            susd_id,
             max_time_in_queue_nanos,
             min_confirmations,
             mode,
@@ -433,6 +437,7 @@ impl CkBtcMinterState {
         self.ecdsa_key_name = ecdsa_key_name;
         self.retrieve_btc_min_amount = retrieve_btc_min_amount;
         self.ledger_id = ledger_id;
+        self.susd_id = susd_id;
         self.max_time_in_queue_nanos = max_time_in_queue_nanos;
         self.mode = mode;
         self.kyt_principal = kyt_principal;
@@ -1234,6 +1239,7 @@ impl From<InitArgs> for CkBtcMinterState {
             tokens_minted: 0,
             tokens_burned: 0,
             ledger_id: args.ledger_id,
+            susd_id: args.susd_id,
             kyt_principal: args.kyt_principal,
             available_utxos: Default::default(),
             outpoint_account: Default::default(),
