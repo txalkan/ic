@@ -439,7 +439,7 @@ fn finalized_txids(candidates: &[state::SubmittedBtcTransaction], new_utxos: &[U
         .collect()
 }
 
-// @review(kyt)
+// @review (kyt)
 async fn reimburse_failed_kyt() {
     let try_to_reimburse = state::read_state(|s| s.pending_reimbursements.clone());
     for (burn_block_index, entry) in try_to_reimburse {
@@ -447,18 +447,18 @@ async fn reimburse_failed_kyt() {
             ReimbursementReason::TaintedDestination { kyt_fee, .. } => (Status::Rejected, kyt_fee),
             ReimbursementReason::CallFailed => (Status::CallFailed, 0),
         };
-        let reimburse_memo = crate::memo::MintMemo::KytFail {
-            kyt_fee: Some(kyt_fee),
-            status: Some(memo_status),
-            associated_burn_index: Some(burn_block_index),
-        };
+        // let reimburse_memo = crate::memo::MintMemo::KytFail {
+        //     kyt_fee: Some(kyt_fee),
+        //     status: Some(memo_status),
+        //     associated_burn_index: Some(burn_block_index),
+        // };
         if let Ok(block_index) = crate::updates::update_balance::mint(
             entry
                 .amount
                 .checked_sub(kyt_fee)
                 .expect("reimburse underflow"),
             entry.account,
-            crate::memo::encode(&reimburse_memo).into(),
+            /*crate::memo::encode(&reimburse_memo).into(),*/
         )
         .await
         {

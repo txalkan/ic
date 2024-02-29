@@ -436,7 +436,7 @@ async fn balance_of(user: Principal) -> Result<u64, RetrieveBtcError> {
         ledger_canister_id: read_state(|s| s.ledger_id.get().into()),
     };
     let minter = ic_cdk::id();
-    let subaccount = compute_subaccount(PrincipalId(user), 0);
+    let subaccount = compute_subaccount(PrincipalId(user), 0, ""); //@review (susd)
     let result = client
         .balance_of(Account {
             owner: minter,
@@ -460,7 +460,7 @@ async fn burn_ckbtcs(user: Principal, amount: u64, memo: Memo) -> Result<u64, Re
         ledger_canister_id: read_state(|s| s.ledger_id.get().into()),
     };
     let minter = ic_cdk::id();
-    let from_subaccount = compute_subaccount(PrincipalId(user), 0);
+    let from_subaccount = compute_subaccount(PrincipalId(user), 0, ""); //@review (susd)
     let result = client
         .transfer(TransferArg {
             from_subaccount: Some(from_subaccount),

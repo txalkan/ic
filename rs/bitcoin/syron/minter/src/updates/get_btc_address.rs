@@ -4,10 +4,13 @@ use crate::{
     ECDSAPublicKey,
 };
 use candid::{CandidType, Deserialize, Principal};
+use ic_base_types::PrincipalId;
 use ic_canister_log::log;
 use ic_ic00_types::DerivationPath;
 use icrc_ledger_types::icrc1::account::{Account, Subaccount};
 use serde::Serialize;
+
+use super::get_withdrawal_account::compute_subaccount;
 
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GetBtcAddressArgs {
@@ -34,13 +37,22 @@ pub async fn get_btc_address(args: GetBtcAddressArgs) -> String {
 
     init_ecdsa_public_key().await;
 
+    //@syron Deposit account = Withdrawal account
+    let principal_id = PrincipalId(owner);
+    let ssi_subaccount = compute_subaccount(principal_id, 0, &args.ssi);
+
+    let caller_account =  &Account {
+        owner,
+        subaccount: Some(ssi_subaccount)//subaccount: args.subaccount,
+    };
+
+    ic_cdk::println!("Account: {}", caller_account);
+    ic_cdk::println!("Account's Principal: {}", principal_id);
+
     read_state(|s| {
         account_to_p2wpkh_address_from_state(
             s,
-            &Account {
-                owner,
-                subaccount: args.subaccount,
-            },
+            caller_account,
             &args.ssi
         )
     })
