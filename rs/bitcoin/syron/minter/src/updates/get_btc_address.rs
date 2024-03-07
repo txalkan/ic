@@ -14,8 +14,8 @@ use super::get_withdrawal_account::compute_subaccount;
 
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GetBtcAddressArgs {
-    pub owner: Option<Principal>,
-    pub subaccount: Option<Subaccount>,
+    //pub owner: Option<Principal>,
+    //pub subaccount: Option<Subaccount>,
     
     pub ssi: String
 }
@@ -33,21 +33,20 @@ pub fn account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Acco
 }
 
 pub async fn get_btc_address(args: GetBtcAddressArgs) -> String {
-    let owner = args.owner.unwrap_or_else(ic_cdk::caller);
+    //let owner = args.owner.unwrap_or_else(ic_cdk::caller);
 
     init_ecdsa_public_key().await;
 
     //@syron Deposit account = Withdrawal account
-    let principal_id = PrincipalId(owner);
-    let ssi_subaccount = compute_subaccount(principal_id, 0, &args.ssi);
+    let minter = ic_cdk::id();
+    let ssi_subaccount = compute_subaccount(PrincipalId(minter), 1, &args.ssi);
 
     let caller_account =  &Account {
-        owner,
+        owner: minter,
         subaccount: Some(ssi_subaccount)//subaccount: args.subaccount,
     };
 
     ic_cdk::println!("Account: {}", caller_account);
-    ic_cdk::println!("Account's Principal: {}", principal_id);
 
     read_state(|s| {
         account_to_p2wpkh_address_from_state(

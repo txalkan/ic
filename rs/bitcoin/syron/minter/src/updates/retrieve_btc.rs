@@ -64,6 +64,11 @@ pub enum ErrorCode {
     KytCallFailed = 2,
 }
 
+pub enum SyronLedger {
+    BTC,
+    SUSD,
+}
+
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
 pub enum RetrieveBtcError {
     /// There is another request for this principal.
@@ -152,9 +157,10 @@ impl From<ParseAddressError> for RetrieveBtcWithApprovalError {
 }
 
 pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, RetrieveBtcError> {
-    let caller = ic_cdk::caller();
+    let minter = ic_cdk::id();
+    let ssi = &args.ssi;
 
-    state::read_state(|s| s.mode.is_withdrawal_available_for(&caller))
+    state::read_state(|s| s.mode.is_withdrawal_available_for(&minter))
         .map_err(RetrieveBtcError::TemporarilyUnavailable)?;
 
     if crate::blocklist::BTC_ADDRESS_BLOCKLIST
@@ -171,14 +177,14 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
             owner: ic_cdk::id(),
             subaccount: None,
         },
-        &args.ssi
+        ssi
     );
 
     if args.address == main_address.display(state::read_state(|s| s.btc_network)) {
         ic_cdk::trap("illegal retrieve_btc target");
     }
 
-    let _guard = retrieve_btc_guard(caller)?;
+    //let _guard = retrieve_btc_guard(caller)?; @review (guard)
     let (min_retrieve_amount, btc_network, kyt_fee) =
         read_state(|s| (s.retrieve_btc_min_amount, s.btc_network, s.kyt_fee));
 
@@ -195,59 +201,59 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         ));
     }
 
-    let balance = balance_of(caller).await?;
+    let balance = balance_of(SyronLedger::BTC, ssi).await?;
     if args.amount > balance {
         return Err(RetrieveBtcError::InsufficientFunds { balance });
     }
 
-    let (uuid, status, kyt_provider) =
-        kyt_check_address(caller, args.address.clone(), args.amount).await?;
+    // let (uuid, status, kyt_provider) =
+    //     kyt_check_address(caller, args.address.clone(), args.amount).await?;
 
-    match status {
-        BtcAddressCheckStatus::Tainted => {
-            let burn_memo = BurnMemo::Convert {
-                address: Some(&args.address),
-                kyt_fee: Some(kyt_fee),
-                status: Some(Status::Rejected),
-            };
-            let block_index =
-                burn_ckbtcs(caller, kyt_fee, crate::memo::encode(&burn_memo).into()).await?;
-            log!(
-                P1,
-                "rejected an attempt to withdraw {} BTC to address {} due to failed KYT check (burnt {} ckBTC in block {})",
-                crate::tx::DisplayAmount(args.amount),
-                args.address,
-                crate::tx::DisplayAmount(kyt_fee),
-                block_index
-            );
-            mutate_state(|s| {
-                state::audit::retrieve_btc_kyt_failed(
-                    s,
-                    caller,
-                    args.address,
-                    args.amount,
-                    kyt_provider,
-                    uuid,
-                    block_index,
-                )
-            });
-            return Err(RetrieveBtcError::GenericError {
-                error_message: format!(
-                    "Destination address is tainted, KYT check fee deducted: {}",
-                    crate::tx::DisplayAmount(kyt_fee),
-                ),
-                error_code: ErrorCode::TaintedAddress as u64,
-            });
-        }
-        BtcAddressCheckStatus::Clean => {}
-    }
+    // match status {
+    //     BtcAddressCheckStatus::Tainted => {
+    //         let burn_memo = BurnMemo::Convert {
+    //             address: Some(&args.address),
+    //             kyt_fee: Some(kyt_fee),
+    //             status: Some(Status::Rejected),
+    //         };
+    //         let block_index =
+    //             burn_ckbtcs(caller, kyt_fee, crate::memo::encode(&burn_memo).into(), ssi).await?;
+    //         log!(
+    //             P1,
+    //             "rejected an attempt to withdraw {} BTC to address {} due to failed KYT check (burnt {} ckBTC in block {})",
+    //             crate::tx::DisplayAmount(args.amount),
+    //             args.address,
+    //             crate::tx::DisplayAmount(kyt_fee),
+    //             block_index
+    //         );
+    //         mutate_state(|s| {
+    //             state::audit::retrieve_btc_kyt_failed(
+    //                 s,
+    //                 caller,
+    //                 args.address,
+    //                 args.amount,
+    //                 kyt_provider,
+    //                 uuid,
+    //                 block_index,
+    //             )
+    //         });
+    //         return Err(RetrieveBtcError::GenericError {
+    //             error_message: format!(
+    //                 "Destination address is tainted, KYT check fee deducted: {}",
+    //                 crate::tx::DisplayAmount(kyt_fee),
+    //             ),
+    //             error_code: ErrorCode::TaintedAddress as u64,
+    //         });
+    //     }
+    //     BtcAddressCheckStatus::Clean => {}
+    // }
     let burn_memo = BurnMemo::Convert {
         address: Some(&args.address),
         kyt_fee: Some(kyt_fee),
         status: Some(Status::Accepted),
     };
     let block_index =
-        burn_ckbtcs(caller, args.amount, crate::memo::encode(&burn_memo).into()).await?;
+        burn_ckbtcs(args.amount, crate::memo::encode(&burn_memo).into(), ssi).await?;
     let request = RetrieveBtcRequest {
         // NB. We charge the KYT fee from the retrieve amount.
         amount: args
@@ -257,10 +263,10 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         address: parsed_address,
         block_index,
         received_at: ic_cdk::api::time(),
-        kyt_provider: Some(kyt_provider),
+        kyt_provider: None,//Some(kyt_provider),
         reimbursement_account: Some(Account {
-            owner: caller,
-            subaccount: None,
+            owner: minter,
+            subaccount: None, // @review (burn) compute subaccount
         }),
     };
 
@@ -430,13 +436,23 @@ pub async fn retrieve_btc_with_approval(
     }
 }
 
-async fn balance_of(user: Principal) -> Result<u64, RetrieveBtcError> {
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: read_state(|s| s.ledger_id.get().into()),
-    };
+pub async fn balance_of(ledger: SyronLedger, ssi: &str) -> Result<u64, RetrieveBtcError> {
     let minter = ic_cdk::id();
-    let subaccount = compute_subaccount(PrincipalId(user), 0, ""); //@review (susd)
+
+    let client = match ledger {
+        SyronLedger::BTC => ICRC1Client {
+            runtime: CdkRuntime,
+            ledger_canister_id: read_state(|s| s.ledger_id.get().into()),
+        },
+        SyronLedger::SUSD => ICRC1Client {
+            runtime: CdkRuntime,
+            ledger_canister_id: read_state(|s| s.susd_id.get().into()),
+        }
+    };
+
+    // @review (burn) The user must send ckBTC to a minter-controlled account to withdraw BTC
+    // let minter = ic_cdk::id();
+    let subaccount = compute_subaccount(PrincipalId(minter), 1, ssi);
     let result = client
         .balance_of(Account {
             owner: minter,
@@ -452,7 +468,7 @@ async fn balance_of(user: Principal) -> Result<u64, RetrieveBtcError> {
     Ok(result.0.to_u64().expect("nat does not fit into u64"))
 }
 
-async fn burn_ckbtcs(user: Principal, amount: u64, memo: Memo) -> Result<u64, RetrieveBtcError> {
+async fn burn_ckbtcs(amount: u64, memo: Memo, ssi: &str) -> Result<u64, RetrieveBtcError> {
     debug_assert!(memo.0.len() <= crate::LEDGER_MEMO_SIZE as usize);
 
     let client = ICRC1Client {
@@ -460,7 +476,9 @@ async fn burn_ckbtcs(user: Principal, amount: u64, memo: Memo) -> Result<u64, Re
         ledger_canister_id: read_state(|s| s.ledger_id.get().into()),
     };
     let minter = ic_cdk::id();
-    let from_subaccount = compute_subaccount(PrincipalId(user), 0, ""); //@review (susd)
+    let from_subaccount = compute_subaccount(PrincipalId(minter), 1, ssi);
+    let to_subaccount = compute_subaccount(PrincipalId(minter), 0, ssi);
+    
     let result = client
         .transfer(TransferArg {
             from_subaccount: Some(from_subaccount),

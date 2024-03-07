@@ -65,6 +65,9 @@ pub struct InitArgs {
     /// The CanisterId of the SU$D Syron Ledger
     pub susd_id: CanisterId,
 
+    /// The CanisterId of the Exchange Rate Canister
+    pub xrc_id: CanisterId,
+
     /// Maximum time in nanoseconds that a transaction should spend in the queue
     /// before being sent.
     pub max_time_in_queue_nanos: u64,

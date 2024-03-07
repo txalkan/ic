@@ -3,6 +3,7 @@
 use crate::logs::P0;
 use crate::tx;
 use crate::ECDSAPublicKey;
+use crate::state::read_state;
 use candid::{CandidType, Principal};
 use ic_btc_interface::{
     Address, GetCurrentFeePercentilesRequest, GetUtxosRequest, GetUtxosResponse,
@@ -17,6 +18,7 @@ use ic_ic00_types::{
 };
 use serde::de::DeserializeOwned;
 use std::fmt;
+use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateResult, ExchangeRateError};
 
 /// Represents an error from a management canister call, such as
 /// `sign_with_ecdsa` or `bitcoin_send_transaction`.
@@ -346,5 +348,35 @@ pub async fn fetch_withdrawal_alerts(
         method: "fetch_withdrawal_alerts".to_string(),
         reason: Reason::from_reject(code, message),
     })?;
+    Ok(res)
+}
+
+pub(crate) async fn get_exchange_rate() -> Result<GetExchangeRateResult, CallError> {
+    let btc = Asset {
+        symbol: "BTC".to_string(),
+        class: AssetClass::Cryptocurrency,
+    };
+    let usd = Asset {
+        symbol: "USD".to_string(),
+        class: AssetClass::FiatCurrency,
+    };
+
+    let request = GetExchangeRateRequest {
+        base_asset: btc,
+        quote_asset: usd,
+        timestamp: None,
+    };
+
+    let method = "get_exchange_rate";
+    let (res,): (GetExchangeRateResult,) = ic_cdk::api::call::call(
+        read_state(|s| s.xrc_id.get().into()),
+        method,
+        (request,)
+    )
+    .await
+    .map_err(|(code, msg)| CallError {
+            method: method.to_string(),
+            reason: Reason::from_reject(code, msg),
+        })?;
     Ok(res)
 }

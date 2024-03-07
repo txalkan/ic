@@ -2,8 +2,7 @@
 type Account = record { 
     owner : principal;
     subaccount : opt blob;
-
-    };
+};
 
 type CanisterStatusResponse = record {
   status : CanisterStatusType;
@@ -169,6 +168,9 @@ type InitArgs = record {
     // The default account of the Syron Minter must be configured as
     // the minting account of the ledger.
     susd_id : principal;
+
+    // The principal of the Exchange Rate Canister that handles the oracle prices.
+    xrc_id : principal;
     
     // The name of the ECDSA key to use.
     // E.g., "dfx_test_key" on the local replica.
@@ -389,7 +391,7 @@ service : (minter_arg : MinterArg) -> {
     // to get SU$D using the [update_balance] endpoint.
     //
     // If the owner is not set, it defaults to the caller's principal.
-    get_btc_address : (record { owner: opt principal; subaccount: opt blob; ssi: text }) -> (text);
+    get_btc_address : (record { /*owner: opt principal; subaccount: opt blob;*/ ssi: text }) -> (text);
 
     // Mints SU$D for newly deposited UTXOs.
     //
@@ -399,7 +401,7 @@ service : (minter_arg : MinterArg) -> {
     //
     // * The owner deposited some BTC to the address that the
     //   [get_btc_address] endpoint returns.
-    update_balance : (record { owner: opt principal; subaccount : opt blob; ssi: text }) -> (variant { Ok : vec UtxoStatus; Err : UpdateBalanceError });
+    update_balance : (record { /*owner: opt principal; subaccount : opt blob;*/ ssi: text }) -> (variant { Ok : vec UtxoStatus; Err : UpdateBalanceError });
 
     // }}} Section "Deposit BTC to get SU$D"
 

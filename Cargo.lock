@@ -5922,6 +5922,7 @@ dependencies = [
  "ic-state-machine-tests",
  "ic-test-utilities-load-wasm",
  "ic-utils-ensure",
+ "ic-xrc-types",
  "ic0 0.18.11",
  "icrc-ledger-client-cdk",
  "icrc-ledger-types",

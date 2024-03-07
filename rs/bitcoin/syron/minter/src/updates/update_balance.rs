@@ -1,4 +1,5 @@
 use crate::logs::{P0, P1};
+use crate::management::get_exchange_rate;
 use crate::memo::MintMemo;
 use crate::state::{mutate_state, read_state, UtxoCheckStatus};
 use crate::tasks::{schedule_now, TaskType};
@@ -28,9 +29,9 @@ use crate::{
 pub struct UpdateBalanceArgs {
     /// The owner of the account on the ledger.
     /// The minter uses the caller principal if the owner is None.
-    pub owner: Option<Principal>,
+    //pub owner: Option<Principal>,
     /// The desired subaccount on the ledger, if any.
-    pub subaccount: Option<Subaccount>,
+    //pub subaccount: Option<Subaccount>,
 
     pub ssi: String
 }
@@ -129,27 +130,25 @@ impl From<CallError> for UpdateBalanceError {
 pub async fn update_balance(
     args: UpdateBalanceArgs,
 ) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
-    let controller = args.owner.unwrap_or_else(ic_cdk::caller);
-    
-    if controller == ic_cdk::id() {
-        ic_cdk::trap("cannot update minter's balance");
-    }
+    //let controller = args.owner.unwrap_or_else(ic_cdk::caller);
+    let minter = ic_cdk::id();
+    // if controller == ic_cdk::id() {
+    //     ic_cdk::trap("cannot update minter's balance");
+    // }
 
-    state::read_state(|s| s.mode.is_deposit_available_for(&controller))
-        .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
+    // state::read_state(|s| s.mode.is_deposit_available_for(&controller))
+    //     .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
 
     init_ecdsa_public_key().await;
     
-    let _guard = balance_update_guard(controller)?;
+    //let _guard = balance_update_guard(controller)?; @review (guard)
 
     //@syron Deposit account = Withdrawal account
     
-    let principal_id = PrincipalId(controller);
-    
-    let ssi_subaccount = compute_subaccount(principal_id, 0, &args.ssi);
+    let ssi_subaccount = compute_subaccount(PrincipalId(minter), 1, &args.ssi);
     
     let caller_account = Account {
-        owner: controller,
+        owner: minter,
         subaccount: Some(ssi_subaccount),
     };
 
@@ -394,9 +393,10 @@ pub(crate) async fn mint(ckbtc: u64, to: Account, /*memo: Memo,*/) -> Result<u64
         ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
     };
     
-    // @review (susd) add xrc
-    let susd: u64 = 22;
-
+    // @xrc
+    let xr = get_exchange_rate().await?.unwrap();
+    let susd: u64 = ckbtc / xr.rate;
+    
     let block_index_susd = susd_client
         .transfer(TransferArg {
             from_subaccount: None,

@@ -13,6 +13,7 @@ pub enum TaskType {
     ProcessLogic,
     RefreshFeePercentiles,
     DistributeKytFee,
+    // @review (xrc) fetch bitcoin price
 }
 
 #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]

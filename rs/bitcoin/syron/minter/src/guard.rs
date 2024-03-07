@@ -143,6 +143,7 @@ mod tests {
             retrieve_btc_min_amount: 2000,
             ledger_id: CanisterId::from_u64(42),
             susd_id: CanisterId::from_u64(42),
+            xrc_id: CanisterId::from_u64(42),
             max_time_in_queue_nanos: 0,
             min_confirmations: None,
             mode: crate::state::Mode::GeneralAvailability,

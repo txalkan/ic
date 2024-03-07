@@ -99,11 +99,11 @@ fn check_postcondition<T>(t: T) -> T {
     t
 }
 
-fn check_anonymous_caller() {
-    if ic_cdk::caller() == Principal::anonymous() {
-        panic!("anonymous caller not allowed")
-    }
-}
+// fn check_anonymous_caller() {
+//     if ic_cdk::caller() == Principal::anonymous() {
+//         panic!("anonymous caller not allowed")
+//     }
+// }
 
 #[export_name = "canister_global_timer"]
 fn timer() {
@@ -130,19 +130,19 @@ fn post_upgrade(minter_arg: Option<MinterArg>) {
 
 #[update]
 async fn get_btc_address(args: GetBtcAddressArgs) -> String {
-    check_anonymous_caller();
+    // check_anonymous_caller();
     updates::get_btc_address::get_btc_address(args).await
 }
 
 #[update]
 async fn get_withdrawal_account() -> Account {
-    check_anonymous_caller();
+    // check_anonymous_caller();
     updates::get_withdrawal_account::get_withdrawal_account().await
 }
 
 #[update]
 async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, RetrieveBtcError> {
-    check_anonymous_caller();
+    // check_anonymous_caller();
     check_postcondition(updates::retrieve_btc::retrieve_btc(args).await)
 }
 
@@ -150,7 +150,7 @@ async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, RetrieveBt
 async fn retrieve_btc_with_approval(
     args: RetrieveBtcWithApprovalArgs,
 ) -> Result<RetrieveBtcOk, RetrieveBtcWithApprovalError> {
-    check_anonymous_caller();
+    // check_anonymous_caller();
     check_postcondition(updates::retrieve_btc::retrieve_btc_with_approval(args).await)
 }
 
@@ -171,7 +171,7 @@ fn retrieve_btc_status_v2_by_account(target: Option<Account>) -> Vec<BtcRetrieva
 
 #[update]
 async fn update_balance(args: UpdateBalanceArgs) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
-    check_anonymous_caller();
+    // check_anonymous_caller();
     check_postcondition(updates::update_balance::update_balance(args).await)
 }
 
