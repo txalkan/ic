@@ -479,6 +479,8 @@ service : (minter_arg : MinterArg) -> {
     //
     // NOTE: this method exists for debugging purposes.
     // The Syron Minter authors do not guarantee backward compatibility for this method.
-    get_events : (record { start: nat64; length : nat64 }) -> (vec Event) query;
+    get_events: (record { start: nat64; length : nat64 }) -> (vec Event) query;
     // }}} Section "Event log"
+
+    get_subaccount: ( ssi: bitcoin_address ) -> (blob);
 }

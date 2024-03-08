@@ -436,7 +436,7 @@ pub async fn retrieve_btc_with_approval(
     }
 }
 
-pub async fn balance_of(ledger: SyronLedger, ssi: &str) -> Result<u64, RetrieveBtcError> {
+async fn balance_of(ledger: SyronLedger, ssi: &str) -> Result<u64, RetrieveBtcError> {
     let minter = ic_cdk::id();
 
     let client = match ledger {
@@ -450,9 +450,9 @@ pub async fn balance_of(ledger: SyronLedger, ssi: &str) -> Result<u64, RetrieveB
         }
     };
 
-    // @review (burn) The user must send ckBTC to a minter-controlled account to withdraw BTC
-    // let minter = ic_cdk::id();
-    let subaccount = compute_subaccount(PrincipalId(minter), 1, ssi);
+    // @review (burn) The user must send BTC to a minter-controlled account (nonce 0) to withdraw BTC
+    
+    let subaccount = compute_subaccount(1, ssi);
     let result = client
         .balance_of(Account {
             owner: minter,
@@ -476,9 +476,7 @@ async fn burn_ckbtcs(amount: u64, memo: Memo, ssi: &str) -> Result<u64, Retrieve
         ledger_canister_id: read_state(|s| s.ledger_id.get().into()),
     };
     let minter = ic_cdk::id();
-    let from_subaccount = compute_subaccount(PrincipalId(minter), 1, ssi);
-    let to_subaccount = compute_subaccount(PrincipalId(minter), 0, ssi);
-    
+    let from_subaccount = compute_subaccount(1, ssi);
     let result = client
         .transfer(TransferArg {
             from_subaccount: Some(from_subaccount),

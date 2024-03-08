@@ -368,15 +368,50 @@ pub(crate) async fn get_exchange_rate() -> Result<GetExchangeRateResult, CallErr
     };
 
     let method = "get_exchange_rate";
-    let (res,): (GetExchangeRateResult,) = ic_cdk::api::call::call(
+    // let (res,): (GetExchangeRateResult,) = ic_cdk::api::call::call(
+    //     read_state(|s| s.xrc_id.get().into()),
+    //     method,
+    //     (input,)
+    // )
+    // .await
+    // .map_err(|(code, msg)| CallError {
+    //         method: method.to_string(),
+    //         reason: Reason::from_reject(code, msg),
+    //     })?;
+    // Ok(res);
+
+    let payment = 10_000_000_000;
+
+    let balance = ic_cdk::api::canister_balance128();
+    
+    if balance < payment as u128 {
+        log!(
+            P0,
+            "Failed to call {}: need {} cycles, the balance is only {}",
+            method,
+            payment,
+            balance
+        );
+
+        return Err(CallError {
+            method: method.to_string(),
+            reason: Reason::OutOfCycles,
+        });
+    }
+
+    let res: Result<(GetExchangeRateResult,), _> = ic_cdk::api::call::call_with_payment(
         read_state(|s| s.xrc_id.get().into()),
         method,
-        (request,)
+        (request,),
+        payment,
     )
-    .await
-    .map_err(|(code, msg)| CallError {
+    .await;
+
+    match res {
+        Ok((output,)) => Ok(output),
+        Err((code, msg)) => Err(CallError {
             method: method.to_string(),
             reason: Reason::from_reject(code, msg),
-        })?;
-    Ok(res)
+        }),
+    }
 }

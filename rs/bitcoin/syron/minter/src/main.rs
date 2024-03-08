@@ -11,9 +11,9 @@ use ic_ckbtc_minter_syron::state::{
     read_state, BtcRetrievalStatusV2, RetrieveBtcStatus, RetrieveBtcStatusV2,
 };
 use ic_ckbtc_minter_syron::tasks::{schedule_now, TaskType};
+use ic_ckbtc_minter_syron::updates::get_withdrawal_account::compute_subaccount;
 use ic_ckbtc_minter_syron::updates::retrieve_btc::{
-    RetrieveBtcArgs, RetrieveBtcError, RetrieveBtcOk, RetrieveBtcWithApprovalArgs,
-    RetrieveBtcWithApprovalError,
+    RetrieveBtcArgs, RetrieveBtcError, RetrieveBtcOk, RetrieveBtcWithApprovalArgs, RetrieveBtcWithApprovalError
 };
 use ic_ckbtc_minter_syron::updates::{
     self,
@@ -25,7 +25,7 @@ use ic_ckbtc_minter_syron::{
     state::eventlog::{Event, GetEventsArg},
     storage, {Log, LogEntry, Priority},
 };
-use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc1::account::{Account, Subaccount};
 
 #[init]
 fn init(args: MinterArg) {
@@ -307,6 +307,11 @@ fn self_check() -> Result<(), String> {
 #[query(hidden = true)]
 fn __get_candid_interface_tmp_hack() -> &'static str {
     include_str!(env!("MINTER_DID_PATH"))
+}
+
+#[update]
+async fn get_subaccount(ssi: String) -> Subaccount {
+    compute_subaccount(1, &ssi)
 }
 
 fn main() {}

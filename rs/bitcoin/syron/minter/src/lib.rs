@@ -463,7 +463,7 @@ async fn reimburse_failed_kyt() {
         .await
         {
             state::mutate_state(|s| {
-                state::audit::reimbursed_failed_deposit(s, burn_block_index, block_index)
+                state::audit::reimbursed_failed_deposit(s, burn_block_index, block_index[0])
             });
         }
     }

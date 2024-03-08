@@ -127,38 +127,214 @@ impl From<CallError> for UpdateBalanceError {
 }
 
 /// Notifies the ckBTC minter to update the balance of the user subaccount.
+// pub async fn update_balance(
+//     args: UpdateBalanceArgs,
+// ) -> Result<Vec<u64/*UtxoStatus*/>, UpdateBalanceError> {
+//     //let controller = args.owner.unwrap_or_else(ic_cdk::caller);
+//     let minter = ic_cdk::id();
+//     // if controller == ic_cdk::id() {
+//     //     ic_cdk::trap("cannot update minter's balance");
+//     // }
+
+//     // state::read_state(|s| s.mode.is_deposit_available_for(&controller))
+//     //     .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
+
+//     init_ecdsa_public_key().await;
+    
+//     //let _guard = balance_update_guard(controller)?; @review (guard)
+
+//     //@syron Deposit account = Withdrawal account
+    
+//     let ssi_subaccount = compute_subaccount(PrincipalId(minter), 1, &args.ssi);
+    
+//     let caller_account = Account {
+//         owner: minter,
+//         subaccount: Some(ssi_subaccount),
+//     };
+
+//     ic_cdk::println!("Account: {}", caller_account);
+
+//     let address = state::read_state(|s| {
+//         get_btc_address::account_to_p2wpkh_address_from_state(s, &caller_account, &args.ssi)
+//     });
+
+//     ic_cdk::println!("SSI Vault: {}", address);
+
+//     let (btc_network, min_confirmations) =
+//         state::read_state(|s| (s.btc_network, s.min_confirmations));
+
+//     let utxos = get_utxos(btc_network, &address, min_confirmations, CallSource::Client)
+//         .await?
+//         .utxos;
+
+//     let new_utxos = state::read_state(|s| s.new_utxos_for_account(utxos, &caller_account));
+
+//     // Remove pending finalized transactions for the affected principal.
+//     state::mutate_state(|s| s.finalized_utxos.remove(&caller_account.owner));
+
+//     let satoshis_to_mint = new_utxos.iter().map(|u| u.value).sum::<u64>();
+
+//     if satoshis_to_mint == 0 {
+//         // We bail out early if there are no UTXOs to avoid creating a new entry
+//         // in the UTXOs map. If we allowed empty entries, malicious callers
+//         // could exhaust the canister memory.
+
+//         // We get the entire list of UTXOs again with a zero
+//         // confirmation limit so that we can indicate the approximate
+//         // wait time to the caller.
+//         let GetUtxosResponse {
+//             tip_height,
+//             mut utxos,
+//             ..
+//         } = get_utxos(
+//             btc_network,
+//             &address,
+//             /*min_confirmations=*/ 0,
+//             CallSource::Client,
+//         )
+//         .await?;
+
+//         utxos.retain(|u| {
+//             tip_height
+//                 < u.height
+//                     .checked_add(min_confirmations)
+//                     .expect("bug: this shouldn't overflow")
+//                     .checked_sub(1)
+//                     .expect("bug: this shouldn't underflow")
+//         });
+//         let pending_utxos: Vec<PendingUtxo> = utxos
+//             .iter()
+//             .map(|u| PendingUtxo {
+//                 outpoint: u.outpoint.clone(),
+//                 value: u.value,
+//                 confirmations: tip_height - u.height + 1,
+//             })
+//             .collect();
+
+//         let current_confirmations = pending_utxos.iter().map(|u| u.confirmations).max();
+
+//         return Err(UpdateBalanceError::NoNewUtxos {
+//             current_confirmations,
+//             required_confirmations: min_confirmations,
+//             pending_utxos: Some(pending_utxos),
+//         });
+//     }
+
+//     let token_name = match btc_network {
+//         ic_ic00_types::BitcoinNetwork::Mainnet => "ckBTC",
+//         _ => "ckTESTBTC",
+//     };
+
+//     let kyt_fee = 0;//read_state(|s| s.kyt_fee); @review(kyt)
+    
+//     let mut utxo_statuses: Vec<UtxoStatus> = vec![];
+    
+//     let mut ckbtc_amount: u64 = 0;
+//     for utxo in new_utxos {
+//         if utxo.value <= kyt_fee {
+//             mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
+//             log!(
+//                 P1,
+//                 "Ignored UTXO {} for account {caller_account} because UTXO value {} is lower than the KYT fee {}",
+//                 DisplayOutpoint(&utxo.outpoint),
+//                 DisplayAmount(utxo.value),
+//                 DisplayAmount(kyt_fee),
+//             );
+//             utxo_statuses.push(UtxoStatus::ValueTooSmall(utxo));
+//             continue;
+//         }
+//         let (uuid, status, kyt_provider) = kyt_check_utxo(caller_account.owner, &utxo).await?;
+        
+//         // @review(kyt) state change implications
+//         mutate_state(|s| {
+//             crate::state::audit::mark_utxo_checked(s, &utxo, uuid.clone(), status, kyt_provider);
+//         });
+//         if status == UtxoCheckStatus::Tainted {
+//             utxo_statuses.push(UtxoStatus::Tainted(utxo.clone()));
+//             continue;
+//         }
+//         let amount = utxo.value - kyt_fee;
+//         // let memo = MintMemo::Convert {
+//         //     txid: Some(utxo.outpoint.txid.as_ref()),
+//         //     vout: Some(utxo.outpoint.vout),
+//         //     kyt_fee: Some(kyt_fee),
+//         // };
+//         ckbtc_amount += amount
+//     }
+
+//     let res = mint(ckbtc_amount, caller_account, /*crate::memo::encode(&memo).into(),*/).await;
+    
+//     // @review (mint) log
+//     // match res {
+//     //     Ok(res) => {
+//     //         log!(
+//     //             P1,
+//     //             "Minted {ckbtc_amount} {token_name} for account {caller_account}"// corresponding to utxo {} with value {}",
+//     //             // DisplayOutpoint(&utxo.outpoint),
+//     //             // DisplayAmount(utxo.value),
+//     //         );
+
+//     //         // @review (utxo)
+//     //         // state::mutate_state(|s| {
+//     //         //     state::audit::add_utxos(
+//     //         //         s,
+//     //         //         Some(block_index),
+//     //         //         caller_account,
+//     //         //         vec![utxo.clone()],
+//     //         //     )
+//     //         // });
+//     //         // utxo_statuses.push(UtxoStatus::Minted {
+//     //         //     block_index,
+//     //         //     utxo,
+//     //         //     minted_amount: ckbtc_amount,
+//     //         // });
+//     //     }
+//     //     Err(err) => {
+//     //         log!(
+//     //             P0,
+//     //             "Failed to mint SU$D - Error: {:?}",
+//     //             // DisplayOutpoint(&utxo.outpoint),
+//     //             err
+//     //         );
+
+//     //         // @review (utxo)
+//     //         // utxo_statuses.push(UtxoStatus::Checked(utxo));
+//     //     }
+//     // }
+
+//     schedule_now(TaskType::ProcessLogic);
+
+//     return res;
+//     // Ok(utxo_statuses)
+// }
+
+/// Notifies the ckBTC minter to update the balance of the user subaccount.
 pub async fn update_balance(
     args: UpdateBalanceArgs,
 ) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
-    //let controller = args.owner.unwrap_or_else(ic_cdk::caller);
     let minter = ic_cdk::id();
-    // if controller == ic_cdk::id() {
+    // let caller = ic_cdk::caller();
+    // if args.owner.unwrap_or(caller) == ic_cdk::id() {
     //     ic_cdk::trap("cannot update minter's balance");
     // }
 
-    // state::read_state(|s| s.mode.is_deposit_available_for(&controller))
-    //     .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
+    
+    state::read_state(|s| s.mode.is_deposit_available_for(&minter))
+        .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
 
     init_ecdsa_public_key().await;
-    
-    //let _guard = balance_update_guard(controller)?; @review (guard)
+    let _guard = balance_update_guard(minter/*args.owner.unwrap_or(caller)*/)?;
 
-    //@syron Deposit account = Withdrawal account
-    
-    let ssi_subaccount = compute_subaccount(PrincipalId(minter), 1, &args.ssi);
+    let ssi_subaccount = compute_subaccount(1, &args.ssi);
     
     let caller_account = Account {
-        owner: minter,
-        subaccount: Some(ssi_subaccount),
+        owner: minter,//args.owner.unwrap_or(caller),
+        subaccount: Some(ssi_subaccount)//args.subaccount,
     };
-
-    ic_cdk::println!("Account: {}", caller_account);
 
     let address = state::read_state(|s| {
         get_btc_address::account_to_p2wpkh_address_from_state(s, &caller_account, &args.ssi)
     });
-
-    ic_cdk::println!("SSI Vault: {}", address);
 
     let (btc_network, min_confirmations) =
         state::read_state(|s| (s.btc_network, s.min_confirmations));
@@ -225,11 +401,8 @@ pub async fn update_balance(
         _ => "ckTESTBTC",
     };
 
-    let kyt_fee = 0;//read_state(|s| s.kyt_fee); @review(kyt)
-    
+    let kyt_fee = read_state(|s| s.kyt_fee);
     let mut utxo_statuses: Vec<UtxoStatus> = vec![];
-    
-    let mut ckbtc_amount: u64 = 0;
     for utxo in new_utxos {
         if utxo.value <= kyt_fee {
             mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
@@ -243,9 +416,9 @@ pub async fn update_balance(
             utxo_statuses.push(UtxoStatus::ValueTooSmall(utxo));
             continue;
         }
+
+        // @review (kyt)
         // let (uuid, status, kyt_provider) = kyt_check_utxo(caller_account.owner, &utxo).await?;
-        
-        // @review(kyt) state change implications
         // mutate_state(|s| {
         //     crate::state::audit::mark_utxo_checked(s, &utxo, uuid.clone(), status, kyt_provider);
         // });
@@ -254,52 +427,55 @@ pub async fn update_balance(
         //     continue;
         // }
         let amount = utxo.value - kyt_fee;
-        // let memo = MintMemo::Convert {
-        //     txid: Some(utxo.outpoint.txid.as_ref()),
-        //     vout: Some(utxo.outpoint.vout),
-        //     kyt_fee: Some(kyt_fee),
-        // };
-        ckbtc_amount += amount
-    }
-    match mint(ckbtc_amount, caller_account, /*crate::memo::encode(&memo).into(),*/).await {
-        Ok(block_index) => {
-            log!(
-                P1,
-                "Minted {ckbtc_amount} {token_name} for account {caller_account}"// corresponding to utxo {} with value {}",
-                // DisplayOutpoint(&utxo.outpoint),
-                // DisplayAmount(utxo.value),
-            );
+        let memo = MintMemo::Convert {
+            txid: Some(utxo.outpoint.txid.as_ref()),
+            vout: Some(utxo.outpoint.vout),
+            kyt_fee: Some(kyt_fee),
+        };
 
-                // @review (utxo)
-                // state::mutate_state(|s| {
-                //     state::audit::add_utxos(
-                //         s,
-                //         Some(block_index),
-                //         caller_account,
-                //         vec![utxo.clone()],
-                //     )
-                // });
-                // utxo_statuses.push(UtxoStatus::Minted {
-                //     block_index,
-                //     utxo,
-                //     minted_amount: ckbtc_amount,
-                // });
-        }
-        Err(err) => {
-            log!(
-                P0,
-                "Failed to mint SU$D - Error: {:?}",
-                // DisplayOutpoint(&utxo.outpoint),
-                err
-            );
-
-            // @review (utxo)
-            // utxo_statuses.push(UtxoStatus::Checked(utxo));
+        // @review (mint) consider using satoshis_to_mint
+        match mint(amount, caller_account, /*crate::memo::encode(&memo).into()*/).await {
+            Ok(block_index) => {
+                log!(
+                    P1,
+                    "Minted {amount} {token_name} for account {caller_account} corresponding to utxo {} with value {}",
+                    DisplayOutpoint(&utxo.outpoint),
+                    DisplayAmount(utxo.value),
+                );
+                state::mutate_state(|s| {
+                    state::audit::add_utxos(
+                        s,
+                        Some(block_index[0]),
+                        caller_account,
+                        vec![utxo.clone()],
+                    )
+                });
+                utxo_statuses.push(UtxoStatus::Minted {
+                    block_index: block_index[0],
+                    utxo,
+                    minted_amount: amount,
+                });
+            }
+            Err(err) => {
+                log!(
+                    P0,
+                    "Failed to mint ckBTC for UTXO {}: {:?}",
+                    DisplayOutpoint(&utxo.outpoint),
+                    err
+                );
+                utxo_statuses.push(UtxoStatus::Checked(utxo));
+            }
         }
     }
 
     schedule_now(TaskType::ProcessLogic);
-
+    
+    // let res = match mint(satoshis_to_mint, caller_account).await {
+    //     Ok(res) => Ok(utxo_statuses),
+    //     Err(res) => Err(res)
+    // };
+    // return res
+    
     Ok(utxo_statuses)
 }
 
@@ -363,7 +539,7 @@ async fn kyt_check_utxo(
 }
 
 /// Mint an amount of SU$D to an Account & Lock the BTC collateral
-pub(crate) async fn mint(ckbtc: u64, to: Account, /*memo: Memo,*/) -> Result<u64, UpdateBalanceError> {
+pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
     // debug_assert!(memo.0.len() <= crate::LEDGER_MEMO_SIZE as usize);
     let client = ICRC1Client {
         runtime: CdkRuntime,
@@ -377,7 +553,7 @@ pub(crate) async fn mint(ckbtc: u64, to: Account, /*memo: Memo,*/) -> Result<u64
             fee: None,
             created_at_time: None,
             memo: None,//Some(memo),
-            amount: Nat::from(ckbtc),
+            amount: Nat::from(satoshis),
         })
         .await
         .map_err(|(code, msg)| {
@@ -390,13 +566,13 @@ pub(crate) async fn mint(ckbtc: u64, to: Account, /*memo: Memo,*/) -> Result<u64
     // @dev (susd)
     let susd_client = ICRC1Client {
         runtime: CdkRuntime,
-        ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
+        ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
     };
     
     // @xrc
     let xr = get_exchange_rate().await?.unwrap();
-    let susd: u64 = ckbtc / xr.rate;
-    
+    let susd: u64 = satoshis * xr.rate / 1_000_000_000 * 66 / 100; //@review (xrc) over-collateralization ratio (0.66)
+
     let block_index_susd = susd_client
         .transfer(TransferArg {
             from_subaccount: None,
@@ -413,6 +589,20 @@ pub(crate) async fn mint(ckbtc: u64, to: Account, /*memo: Memo,*/) -> Result<u64
                 msg, code
             ))
         })??;
+
+    // return Err(
+    //     UpdateBalanceError::TemporarilyUnavailable(format!(
+    //         "satoshis: {}, xc: {}, su$d: {}",
+    //         satoshis, xr.rate, susd
+    //     ))
+    // );
     
-    Ok(block_index.0.to_u64().expect("nat does not fit into u64"))
+    log!(
+        P0,
+        "Minted {susd} SU$D with {satoshis} BTC for account {to} at XR: {}",
+        DisplayAmount(xr.rate),
+    );
+
+    let res = [block_index.0.to_u64().expect("nat does not fit into u64"), block_index_susd.0.to_u64().expect("nat does not fit into u64")];
+    Ok(res.to_vec())
 }

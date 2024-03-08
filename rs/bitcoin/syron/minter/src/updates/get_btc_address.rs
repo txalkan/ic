@@ -39,7 +39,7 @@ pub async fn get_btc_address(args: GetBtcAddressArgs) -> String {
 
     //@syron Deposit account = Withdrawal account
     let minter = ic_cdk::id();
-    let ssi_subaccount = compute_subaccount(PrincipalId(minter), 1, &args.ssi);
+    let ssi_subaccount = compute_subaccount(1, &args.ssi);
 
     let caller_account =  &Account {
         owner: minter,
