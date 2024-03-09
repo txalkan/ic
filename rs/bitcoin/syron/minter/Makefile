@@ -1,5 +1,5 @@
 .PHONY: all
-all: ledgers reinstall_ledgers deploy vault susd withdrawal_account info status reinstall bal_btc_minter bal_susd_minter bal_btc bal_susd cy
+all: clean reinstall_ledgers reinstall susd
 
 # ----
 # export PRINCIPAL=$(dfx identity get-principal)
