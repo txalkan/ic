@@ -7,7 +7,7 @@ use ic_btc_interface::Network;
 use serde::Serialize;
 
 pub const DEFAULT_MIN_CONFIRMATIONS: u32 = 6;
-pub const DEFAULT_KYT_FEE: u64 = 1000;
+pub const DEFAULT_KYT_FEE: u64 = 0;
 
 #[derive(CandidType, serde::Deserialize)]
 pub enum MinterArg {

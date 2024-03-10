@@ -92,6 +92,7 @@ type RetrieveBtcOk = record {
 
 // The result of an [update_balance] call.
 type UtxoStatus = variant {
+    TransferInscription: Utxo;
     // The minter ignored this UTXO because UTXO's value is too small to pay
     // the KYT fees. This state is final, retrying [update_balance] call will
     // have no effect on this UTXO.
@@ -482,5 +483,5 @@ service : (minter_arg : MinterArg) -> {
     get_events: (record { start: nat64; length : nat64 }) -> (vec Event) query;
     // }}} Section "Event log"
 
-    get_subaccount: ( ssi: bitcoin_address ) -> (blob);
+    get_subaccount: ( ssi: text ) -> (blob);
 }

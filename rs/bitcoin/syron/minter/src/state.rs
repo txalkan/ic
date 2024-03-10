@@ -495,9 +495,9 @@ impl CkBtcMinterState {
     }
 
     pub fn validate_config(&self) {
-        // if self.kyt_fee > self.retrieve_btc_min_amount {
-        //     ic_cdk::trap("kyt_fee cannot be greater than retrieve_btc_min_amount");
-        // }
+        if self.kyt_fee > self.retrieve_btc_min_amount {
+            ic_cdk::trap("kyt_fee cannot be greater than retrieve_btc_min_amount");
+        }
         if self.ecdsa_key_name.is_empty() {
             ic_cdk::trap("ecdsa_key_name is not set");
         }
@@ -1010,7 +1010,7 @@ impl CkBtcMinterState {
 
     /// Adds given UTXO to the set of ignored UTXOs.
     fn ignore_utxo(&mut self, utxo: Utxo) {
-        assert!(utxo.value <= self.kyt_fee);
+        // assert!(utxo.value <= self.kyt_fee);
         self.ignored_utxos.insert(utxo);
     }
 

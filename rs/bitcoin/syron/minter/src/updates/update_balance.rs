@@ -39,6 +39,8 @@ pub struct UpdateBalanceArgs {
 /// The outcome of UTXO processing.
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum UtxoStatus {
+    /// The UTXO has a transfer inscription
+    TransferInscription(Utxo),
     /// The UTXO value does not cover the KYT check cost.
     ValueTooSmall(Utxo),
     /// The KYT check found issues with the deposited UTXO.
@@ -417,6 +419,12 @@ pub async fn update_balance(
             continue;
         }
 
+        if utxo.value == 546 {
+            mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
+            utxo_statuses.push(UtxoStatus::TransferInscription(utxo));
+            continue;
+        }
+
         // @review (kyt)
         // let (uuid, status, kyt_provider) = kyt_check_utxo(caller_account.owner, &utxo).await?;
         // mutate_state(|s| {
@@ -571,7 +579,10 @@ pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/) -> Result<
     
     // @xrc
     let xr = get_exchange_rate().await?.unwrap();
-    let susd: u64 = satoshis * xr.rate / 1_000_000_000 * 66 / 100; //@review (xrc) over-collateralization ratio (0.66)
+    // let susd: u64 = satoshis * xr.rate / 1_000_000_000 * 66 / 100; //@review (xrc) over-collateralization ratio (0.66)
+
+    // @review (dec) update susd from 8 to 18 decimals
+    let susd: u64 = satoshis * xr.rate * 66 / 10;
 
     let block_index_susd = susd_client
         .transfer(TransferArg {
