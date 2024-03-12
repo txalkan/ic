@@ -1,5 +1,6 @@
 //! Utilities to derive, display, and parse bitcoin addresses.
 
+use crate::state;
 use crate::ECDSAPublicKey;
 use bech32::Variant;
 use ic_btc_interface::Network;
@@ -121,13 +122,11 @@ pub fn derive_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Account, s
 /// Derives a Bitcoin address for the specified account and converts it into
 /// bech32 textual representation.
 pub fn account_to_p2wpkh_address(
-    network: Network,
     ecdsa_public_key: &ECDSAPublicKey,
     account: &Account,
     ssi: &str
 ) -> String {
     network_and_public_key_to_p2wpkh(
-        network,
         &derive_public_key(ecdsa_public_key, account, ssi).public_key,
     )
 }
@@ -181,7 +180,10 @@ pub fn version_and_hash_to_address(version: u8, hash: &[u8; 20]) -> String {
 /// # Panics
 ///
 /// This function panics if the public key in not compressed.
-pub fn network_and_public_key_to_p2wpkh(network: Network, public_key: &[u8]) -> String {
+pub fn network_and_public_key_to_p2wpkh(public_key: &[u8]) -> String {
+    let network =
+        state::read_state(|s| (s.btc_network));
+
     assert_eq!(public_key.len(), 33);
     assert!(public_key[0] == 0x02 || public_key[0] == 0x03);
     encode_bech32(network, &crate::tx::hash160(public_key), WitnessVersion::V0)
