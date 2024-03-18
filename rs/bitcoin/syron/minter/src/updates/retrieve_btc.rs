@@ -32,7 +32,7 @@ pub struct RetrieveBtcArgs {
     pub amount: u64,
 
     // address where to send bitcoins
-    pub address: String,
+    // pub address: String,
 
     pub ssi: String
 }
@@ -164,27 +164,29 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         .map_err(RetrieveBtcError::TemporarilyUnavailable)?;
 
     if crate::blocklist::BTC_ADDRESS_BLOCKLIST
-        .binary_search(&args.address.trim())
+        .binary_search(&ssi.trim())
         .is_ok()
     {
         ic_cdk::trap("attempted to retrieve BTC to a blocked address");
     }
 
     let ecdsa_public_key = init_ecdsa_public_key().await;
-    let main_address = account_to_bitcoin_address(
+    
+    let ssi_subaccount = compute_subaccount(1,ssi);
+    
+    let vault_address = account_to_bitcoin_address(
         &ecdsa_public_key,
         &Account {
-            owner: ic_cdk::id(),
-            subaccount: None,
+            owner: minter,
+            subaccount: Some(ssi_subaccount),
         },
         ssi
     );
-
-    if args.address == main_address.display(state::read_state(|s| s.btc_network)) {
+    if ssi.to_string() == vault_address.display(state::read_state(|s| s.btc_network)) {
         ic_cdk::trap("illegal retrieve_btc target");
     }
 
-    //let _guard = retrieve_btc_guard(caller)?; @review (guard)
+    let _guard = retrieve_btc_guard(minter)?;
     let (min_retrieve_amount, btc_network, kyt_fee) =
         read_state(|s| (s.retrieve_btc_min_amount, s.btc_network, s.kyt_fee));
 
@@ -193,7 +195,7 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         return Err(RetrieveBtcError::AmountTooLow(min_amount));
     }
 
-    let parsed_address = BitcoinAddress::parse(&args.address, btc_network)?;
+    let parsed_address = BitcoinAddress::parse(ssi, btc_network)?;
     if read_state(|s| s.count_incomplete_retrieve_btc_requests() >= MAX_CONCURRENT_PENDING_REQUESTS)
     {
         return Err(RetrieveBtcError::TemporarilyUnavailable(
@@ -248,7 +250,7 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
     //     BtcAddressCheckStatus::Clean => {}
     // }
     let burn_memo = BurnMemo::Convert {
-        address: Some(&args.address),
+        address: Some(ssi),
         kyt_fee: Some(kyt_fee),
         status: Some(Status::Accepted),
     };
@@ -274,7 +276,7 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         P1,
         "accepted a retrieve btc request for {} BTC to address {} (block_index = {})",
         crate::tx::DisplayAmount(request.amount),
-        args.address,
+        ssi,
         request.block_index
     );
 

@@ -340,7 +340,7 @@ impl<'a> TxSigHasher<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct UnsignedTransaction {
     pub inputs: Vec<UnsignedInput>,
     pub outputs: Vec<TxOut>,
