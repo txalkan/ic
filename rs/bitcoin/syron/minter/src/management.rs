@@ -351,8 +351,7 @@ pub async fn fetch_withdrawal_alerts(
     Ok(res)
 }
 
-// @review (xrc) should be pub(crate) only
-pub async fn get_exchange_rate() -> Result<GetExchangeRateResult, CallError> {
+pub(crate) async fn get_exchange_rate() -> Result<GetExchangeRateResult, CallError> {
     let btc = Asset {
         symbol: "BTC".to_string(),
         class: AssetClass::Cryptocurrency,

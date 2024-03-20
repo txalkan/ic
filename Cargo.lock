@@ -5407,8 +5407,8 @@ dependencies = [
 
 [[package]]
 name = "ic-btc-interface"
-version = "0.1.0"
-source = "git+https://github.com/dfinity/bitcoin-canister?rev=9b239d1d67253eb14a35be6061e3967d5ec9db9d#9b239d1d67253eb14a35be6061e3967d5ec9db9d"
+version = "0.2.0"
+source = "git+https://github.com/dfinity/bitcoin-canister?rev=d2bff8aa0c2aa9485d839f5ee11e829df5666479#d2bff8aa0c2aa9485d839f5ee11e829df5666479"
 dependencies = [
  "candid",
  "serde",

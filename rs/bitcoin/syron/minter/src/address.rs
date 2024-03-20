@@ -137,7 +137,6 @@ pub fn account_to_bitcoin_address(
     account: &Account,
     ssi: &str
 ) -> BitcoinAddress {
-    // @review use of ""
     let pk = derive_public_key(ecdsa_public_key, account, ssi).public_key;
     BitcoinAddress::P2wpkhV0(crate::tx::hash160(&pk))
 }

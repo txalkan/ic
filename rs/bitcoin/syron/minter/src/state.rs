@@ -39,7 +39,7 @@ pub struct RetrieveBtcRequest {
     /// The amount to convert to BTC.
     /// The minter withdraws BTC transfer fees from this amount.
     pub amount: u64,
-    /// The destination BTC address.
+    /// The destination BTC address (SSI address).
     pub address: BitcoinAddress,
     /// The BURN transaction index on the ledger.
     /// Serves as a unique request identifier.

@@ -456,7 +456,7 @@ ic-certification = "2.3.0"
 ic-cbor = "2.3.0"
 ic-stable-structures = "0.6.2"
 ic-utils = { version = "0.32.0", features = ["raw"] }
-ic-btc-interface = { git = "https://github.com/dfinity/bitcoin-canister", rev = "9b239d1d67253eb14a35be6061e3967d5ec9db9d" }
+ic-btc-interface = { git = "https://github.com/dfinity/bitcoin-canister", rev = "d2bff8aa0c2aa9485d839f5ee11e829df5666479" }
 indexmap = "2.1.0"
 itertools = "0.12.0"
 k256 = { version = "0.13.3", default_features = false, features = [

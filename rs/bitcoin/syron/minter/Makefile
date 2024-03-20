@@ -1,5 +1,5 @@
 .PHONY: all
-all: clean reinstall_ledgers reinstall susd
+all: clean reinstall minter_info
 
 # ----
 # export PRINCIPAL=$(dfx identity get-principal)
@@ -21,13 +21,13 @@ reinstall_ledgers:
 	icrc1_ledger_syron_susd --argument '(variant { Init = record { token_symbol = "SU$D"; token_name = "Syron US Dollar"; decimals = opt 8; minting_account = record { owner = principal "$(PRINCIPAL)" }; transfer_fee = 0; metadata = vec {}; feature_flags = opt record { icrc2 = true }; initial_balances = vec { record { record { owner = principal "ehubr-iyaaa-aaaap-ab3sq-cai"; }; 10_000_000_000_000_000_000; }; }; archive_options = record { num_blocks_to_archive = 1000; trigger_threshold = 2000; controller_id = principal "$(PRINCIPAL)"; cycles_for_archive_creation = opt 10000000000000 }}})'
 
 # ----
-# export BTC_LEDGER=$(dfx canister id --ic icrc1_ledger_syron_btc) SUSD_LEDGER=$(dfx canister id --ic icrc1_ledger_syron_susd) SSI=tb1pjnr5curwpqcxhyxjfcqmya3ms48s7ca7erd6uxwx6dp3svunq2wsq4me33
+# export BTC_LEDGER=$(dfx canister id --ic icrc1_ledger_syron_btc) SUSD_LEDGER=$(dfx canister id --ic icrc1_ledger_syron_susd)
 # ----
 
 .PHONY: deploy
 .SILENT: deploy
 deploy:
-	dfx deploy --ic ic_ckbtc_minter_syron --argument '(variant { Init = record { mode = variant { GeneralAvailability }; btc_network = variant { Testnet }; ledger_id = principal "$(BTC_LEDGER)"; susd_id = principal "$(SUSD_LEDGER)"; xrc_id = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai"; ecdsa_key_name = "test_key_1"; min_confirmations = opt 1; retrieve_btc_min_amount = 10_000; max_time_in_queue_nanos = 600_000_000_000; kyt_fee = opt 0 } })'
+	dfx deploy --ic ic_ckbtc_minter_syron --argument '(variant { Init = record { mode = variant { GeneralAvailability }; btc_network = variant { Testnet }; ledger_id = principal "$(BTC_LEDGER)"; susd_id = principal "$(SUSD_LEDGER)"; xrc_id = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai"; ecdsa_key_name = "test_key_1"; min_confirmations = opt 1; retrieve_btc_min_amount = 600; max_time_in_queue_nanos = 600_000_000_000 } })'
 
 .PHONY: vault
 .SILENT: vault
@@ -63,9 +63,7 @@ status:
 .PHONY: reinstall
 .SILENT: reinstall
 reinstall:
-	# make clean
-	dfx canister --ic install --mode=reinstall ic_ckbtc_minter_syron --argument '(variant { Init = record { mode = variant { GeneralAvailability }; btc_network = variant { Testnet }; ledger_id = principal "$(BTC_LEDGER)"; susd_id = principal "$(SUSD_LEDGER)"; xrc_id = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai"; ecdsa_key_name = "test_key_1"; min_confirmations = opt 1; retrieve_btc_min_amount = 10_000; max_time_in_queue_nanos = 600_000_000_000; kyt_fee = opt 0 } })'
-	make susd
+	dfx canister --ic install --mode=reinstall ic_ckbtc_minter_syron --argument '(variant { Init = record { mode = variant { GeneralAvailability }; btc_network = variant { Testnet }; ledger_id = principal "$(BTC_LEDGER)"; susd_id = principal "$(SUSD_LEDGER)"; xrc_id = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai"; ecdsa_key_name = "test_key_1"; min_confirmations = opt 1; retrieve_btc_min_amount = 1_000; max_time_in_queue_nanos = 600_000_000_000 } })'
 # ;kyt_principal = opt principal "$(PRINCIPAL)"
 
 .PHONY: clean
@@ -118,3 +116,8 @@ transfer_btc:
 	amount = 1_000 })"
 
 #from_subaccount = opt blob \"\6d\60\70\a6\83\8e\5a\d4\0c\12\e5\ee\d2\52\93\dd\3e\29\aa\66\75\0a\72\b1\f6\77\3a\94\67\38\57\0a\"; \
+
+.PHONY: minter_info
+.SILENT: minter_info
+minter_info:
+	dfx canister --ic call ic_ckbtc_minter_syron get_minter_info

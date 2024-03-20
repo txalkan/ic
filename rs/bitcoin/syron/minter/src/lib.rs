@@ -230,13 +230,13 @@ async fn submit_pending_requests() {
         return;
     }
 
-    let main_account = Account {
-        owner: ic_cdk::id(),
-        subaccount: None,
-    };
+    // let main_account = Account { @review (burn)
+    //     owner: ic_cdk::id(),
+    //     subaccount: None,
+    // };
 
     let ecdsa_public_key = updates::get_btc_address::init_ecdsa_public_key().await;
-    let main_address = address::account_to_bitcoin_address(&ecdsa_public_key, &main_account, ""); //@review ""
+    // let main_address = address::account_to_bitcoin_address(&ecdsa_public_key, &main_account, "");
 
     let fee_millisatoshi_per_vbyte = match estimate_fee_per_vbyte().await {
         Some(fee) => fee,
@@ -258,7 +258,6 @@ async fn submit_pending_requests() {
         match build_unsigned_transaction(
             &mut s.available_utxos,
             outputs,
-            main_address,
             fee_millisatoshi_per_vbyte,
         ) {
             Ok((unsigned_tx, change_output, utxos)) => {
@@ -340,13 +339,11 @@ async fn submit_pending_requests() {
 
         let txid = req.unsigned_tx.txid();
 
-        // @review
         match sign_transaction(
             req.key_name,
             &req.ecdsa_public_key,
             &req.outpoint_account,
-            req.unsigned_tx,
-            ""
+            req.unsigned_tx
         )
         .await
         {
@@ -633,7 +630,7 @@ async fn finalize_requests() {
         let (unsigned_tx, change_output, used_utxos) = match build_unsigned_transaction(
             &mut utxos,
             outputs,
-            main_address.clone(),
+            //main_address.clone(),
             tx_fee_per_vbyte,
         ) {
             Ok(tx) => tx,
@@ -664,8 +661,7 @@ async fn finalize_requests() {
             key_name.clone(),
             &ecdsa_public_key,
             &outpoint_account,
-            unsigned_tx,
-            ""//@review ""
+            unsigned_tx
         )
         .await;
 
@@ -836,35 +832,43 @@ pub async fn sign_transaction(
     ecdsa_public_key: &ECDSAPublicKey,
     output_account: &BTreeMap<tx::OutPoint, Account>,
     unsigned_tx: tx::UnsignedTransaction,
-    ssi: &str
 ) -> Result<tx::SignedTransaction, management::CallError> {
     use crate::address::{derivation_path, derive_public_key};
 
     let mut signed_inputs = Vec::with_capacity(unsigned_tx.inputs.len());
     let sighasher = tx::TxSigHasher::new(&unsigned_tx);
-    for input in &unsigned_tx.inputs {
-        let outpoint = &input.previous_output;
+    
+    let data = unsigned_tx.inputs.iter().zip(unsigned_tx.outputs.iter());
+    
+    for (input, output) in data {
+        match output.address {
+            BitcoinAddress::P2wpkhV0(data) => { 
+                let ssi = std::str::from_utf8(&data).expect("Invalid address data");
+                let outpoint = &input.previous_output;
 
-        let account = output_account
-            .get(outpoint)
-            .unwrap_or_else(|| panic!("bug: no account for outpoint {:?}", outpoint));
+                let account = output_account
+                    .get(outpoint)
+                    .unwrap_or_else(|| panic!("bug: no account for outpoint {:?}", outpoint));
 
-        let path = derivation_path(account, ssi);
-        let pubkey = ByteBuf::from(derive_public_key(ecdsa_public_key, account, ssi).public_key);
-        let pkhash = tx::hash160(&pubkey);
+                let path = derivation_path(account, ssi);
+                let pubkey = ByteBuf::from(derive_public_key(ecdsa_public_key, account, ssi).public_key);
+                let pkhash = tx::hash160(&pubkey);
 
-        let sighash = sighasher.sighash(input, &pkhash);
+                let sighash = sighasher.sighash(input, &pkhash);
 
-        let sec1_signature =
-            management::sign_with_ecdsa(key_name.clone(), DerivationPath::new(path), sighash)
-                .await?;
+                let sec1_signature =
+                    management::sign_with_ecdsa(key_name.clone(), DerivationPath::new(path), sighash)
+                        .await?;
 
-        signed_inputs.push(tx::SignedInput {
-            signature: signature::EncodedSignature::from_sec1(&sec1_signature),
-            pubkey,
-            previous_output: outpoint.clone(),
-            sequence: input.sequence,
-        });
+                signed_inputs.push(tx::SignedInput {
+                    signature: signature::EncodedSignature::from_sec1(&sec1_signature),
+                    pubkey,
+                    previous_output: outpoint.clone(),
+                    sequence: input.sequence,
+                });
+            },
+            _ => unreachable!(), // Handle unsupported variants
+        };
     }
     Ok(tx::SignedTransaction {
         inputs: signed_inputs,
@@ -955,7 +959,6 @@ pub enum BuildTxError {
 pub fn build_unsigned_transaction(
     minter_utxos: &mut BTreeSet<Utxo>,
     outputs: Vec<(BitcoinAddress, Satoshi)>,
-    main_address: BitcoinAddress,
     fee_per_vbyte: u64,
 ) -> Result<(tx::UnsignedTransaction, state::ChangeOutput, Vec<Utxo>), BuildTxError> {
     assert!(!outputs.is_empty());
@@ -966,6 +969,7 @@ pub fn build_unsigned_transaction(
     /// https://github.com/bitcoin/bips/blob/master/bip-0125.mediawiki
     const SEQUENCE_RBF_ENABLED: u32 = 0xfffffffd;
 
+    // @dev The total amount to be retrieved by gathering all requests
     let amount = outputs.iter().map(|(_, amount)| amount).sum::<u64>();
 
     let input_utxos = utxos_selection(amount, minter_utxos, outputs.len());
@@ -986,9 +990,10 @@ pub fn build_unsigned_transaction(
 
     debug_assert!(inputs_value >= amount);
 
-    let minter_fee = MINTER_FEE_PER_INPUT * utxos_guard.len() as u64
-        + MINTER_FEE_PER_OUTPUT * (outputs.len() + 1) as u64
-        + MINTER_FEE_CONSTANT;
+    // @review (retrieve) minter fee
+    let minter_fee = 0;// MINTER_FEE_PER_INPUT * utxos_guard.len() as u64
+    //     + MINTER_FEE_PER_OUTPUT * (outputs.len() + 1) as u64
+    //     + MINTER_FEE_CONSTANT;
 
     let change = inputs_value - amount;
     let change_output = state::ChangeOutput {
@@ -1002,10 +1007,10 @@ pub fn build_unsigned_transaction(
             address: address.clone(),
             value: *value,
         })
-        .chain(vec![tx::TxOut {
-            address: main_address.clone(),
-            value: change_output.value,
-        }])
+        // .chain(vec![tx::TxOut {
+        //     address: main_address.clone(),
+        //     value: change_output.value,
+        // }])
         .collect();
 
     debug_assert_eq!(
@@ -1041,7 +1046,7 @@ pub fn build_unsigned_transaction(
     const MIN_OUTPUT_AMOUNT: u64 = 546;
 
     for (output, fee_share) in unsigned_tx.outputs.iter_mut().zip(fee_shares.iter()) {
-        if output.address != main_address {
+        // if output.address != main_address {
             if output.value <= *fee_share + MIN_OUTPUT_AMOUNT {
                 return Err(BuildTxError::DustOutput {
                     address: output.address.clone(),
@@ -1049,7 +1054,7 @@ pub fn build_unsigned_transaction(
                 });
             }
             output.value = output.value.saturating_sub(*fee_share);
-        }
+        // }
     }
 
     debug_assert_eq!(

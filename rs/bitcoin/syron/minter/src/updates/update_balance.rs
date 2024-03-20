@@ -579,10 +579,7 @@ pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/) -> Result<
     
     // @xrc
     let xr = get_exchange_rate().await?.unwrap();
-    // let susd: u64 = satoshis * xr.rate / 1_000_000_000 * 66 / 100; //@review (xrc) over-collateralization ratio (0.66)
-
-    // @review (dec) update susd from 8 to 18 decimals
-    let susd: u64 = satoshis * xr.rate * 66 / 10;
+    let susd: u64 = satoshis * xr.rate / 1_000_000_000 / 15 * 10; //@review (xrc) over-collateralization ratio (1.5)
 
     let block_index_susd = susd_client
         .transfer(TransferArg {
