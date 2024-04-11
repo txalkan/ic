@@ -310,7 +310,7 @@ impl From<CallError> for UpdateBalanceError {
 //     // Ok(utxo_statuses)
 // }
 
-/// Notifies the ckBTC minter to update the balance of the user subaccount.
+/// Notifies the minter to update the balance of the user subaccount.
 pub async fn update_balance(
     args: UpdateBalanceArgs,
 ) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
@@ -399,8 +399,8 @@ pub async fn update_balance(
     }
 
     let token_name = match btc_network {
-        ic_ic00_types::BitcoinNetwork::Mainnet => "ckBTC",
-        _ => "ckTESTBTC",
+        ic_management_canister_types::BitcoinNetwork::Mainnet => "SU$D",
+        _ => "tSU$D",
     };
 
     let kyt_fee = read_state(|s| s.kyt_fee);
