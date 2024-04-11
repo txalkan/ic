@@ -11,7 +11,7 @@ name = "ledger-canister"
 path = "src/main.rs"
 
 [dependencies]
-async-trait = "0.1.57"
+async-trait = { workspace = true }
 candid = { workspace = true }
 candid_parser = { workspace = true }
 ciborium = { workspace = true }
@@ -35,12 +35,12 @@ serde_bytes = { workspace = true }
 serde_cbor = { workspace = true }
 ic-icrc1 = { path = "../../icrc1" }
 icrc-ledger-types = { path = "../../../../packages/icrc-ledger-types" }
-num-traits = {version = "0.2.15"}
+num-traits = { workspace = true }
 
 
 [dev-dependencies]
 candid_parser = { workspace = true }
-hex = "0.4.2"
+hex = { workspace = true }
 ic-icrc1-ledger-sm-tests = { path = "../../icrc1/ledger/sm-tests" }
 ic-state-machine-tests = { path = "../../../state_machine_tests" }
 ic-test-utilities-load-wasm = { path = "../../../test_utilities/load_wasm" }

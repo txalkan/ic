@@ -1,13 +1,15 @@
 use candid::{CandidType, Decode, Encode, Int, Nat, Principal};
 use ic_base_types::PrincipalId;
 use ic_error_types::UserError;
-use ic_ic00_types::{self as ic00, CanisterInfoRequest, CanisterInfoResponse, Method, Payload};
 use ic_icrc1::blocks::encoded_block_to_generic_block;
 use ic_icrc1::{endpoints::StandardRecord, hash::Hash, Block, Operation, Transaction};
 use ic_icrc1_ledger::FeatureFlags;
 use ic_ledger_canister_core::archive::ArchiveOptions;
 use ic_ledger_core::block::{BlockIndex, BlockType};
 use ic_ledger_hash_of::HashOf;
+use ic_management_canister_types::{
+    self as ic00, CanisterInfoRequest, CanisterInfoResponse, Method, Payload,
+};
 use ic_state_machine_tests::{CanisterId, ErrorCode, StateMachine, WasmResult};
 use ic_types::Cycles;
 use ic_universal_canister::{call_args, wasm, UNIVERSAL_CANISTER_WASM};
@@ -819,7 +821,7 @@ where
         standards.push(standard.name);
     }
     standards.sort();
-    assert_eq!(standards, vec!["ICRC-1", "ICRC-2"]);
+    assert_eq!(standards, vec!["ICRC-1", "ICRC-2", "ICRC-3"]);
 }
 
 pub fn test_total_supply<T>(ledger_wasm: Vec<u8>, encode_init_args: fn(InitArgs) -> T)
@@ -1185,7 +1187,7 @@ where
         vec![(Account::from(p1.0), 10_000_000)],
     );
 
-    let now = system_time_to_nanos(env.time());
+    let now = system_time_to_nanos(env.time_of_next_round());
     let tx_window = TX_WINDOW.as_nanos() as u64;
 
     assert_eq!(
@@ -1204,6 +1206,8 @@ where
             }
         )
     );
+
+    let now = system_time_to_nanos(env.time_of_next_round());
 
     assert_eq!(
         Err(TransferError::CreatedInFuture { ledger_time: now }),

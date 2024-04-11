@@ -15,19 +15,25 @@ use axum::{
     Extension, Json,
 };
 use clap::Parser;
+use ic_canister_sandbox_backend_lib::{
+    canister_sandbox_main, compiler_sandbox::compiler_sandbox_main,
+    launcher::sandbox_launcher_main, RUN_AS_CANISTER_SANDBOX_FLAG, RUN_AS_COMPILER_SANDBOX_FLAG,
+    RUN_AS_SANDBOX_LAUNCHER_FLAG,
+};
 use ic_crypto_iccsa::{public_key_bytes_from_der, types::SignatureBytes, verify};
 use ic_crypto_sha2::Sha256;
 use ic_crypto_utils_threshold_sig_der::parse_threshold_sig_key_from_der;
 use pocket_ic::common::rest::{BinaryBlob, BlobCompression, BlobId, RawVerifyCanisterSigArg};
-use pocket_ic_server::state_api::routes::timeout_or_default;
+use pocket_ic_server::state_api::routes::{handler_read_graph, timeout_or_default};
 use pocket_ic_server::state_api::{
-    routes::{instances_routes, status, AppState, RouterExt},
+    routes::{http_gateway_routes, instances_routes, status, AppState, RouterExt},
     state::PocketIcApiStateBuilder,
 };
 use pocket_ic_server::BlobStore;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
@@ -45,7 +51,7 @@ const LOG_DIR_PATH_ENV_NAME: &str = "POCKET_IC_LOG_DIR";
 const LOG_DIR_LEVELS_ENV_NAME: &str = "POCKET_IC_LOG_DIR_LEVELS";
 
 #[derive(Parser)]
-#[clap(version = "3.0.0")]
+#[clap(version = "3.0.1")]
 struct Args {
     /// If you use PocketIC from the command line, you should not use this flag.
     /// Client libraries use this flag to provide a common identifier (the process ID of the test
@@ -56,21 +62,46 @@ struct Args {
     /// The port under which the PocketIC server should be started
     #[clap(long, short, default_value_t = 0)]
     port: u16,
+    /// The file to which the PocketIC server port should be written
+    #[clap(long)]
+    port_file: Option<PathBuf>,
     /// The time-to-live of the PocketIC server in seconds
     #[clap(long, default_value_t = TTL_SEC)]
     ttl: u64,
 }
 
+/// Get the path of the current running binary.
+fn current_binary_path() -> Option<PathBuf> {
+    std::env::args().next().map(PathBuf::from)
+}
+
 fn main() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(16)
-        // we use the tokio rt to dispatch blocking operations in the background
-        .max_blocking_threads(16)
-        .build()
-        .expect("Failed to create tokio runtime!");
-    let runtime_arc = Arc::new(rt);
-    runtime_arc.block_on(async { start(runtime_arc.clone()).await });
+    let current_binary_path = current_binary_path().unwrap();
+    let current_binary_name = current_binary_path.file_name().unwrap().to_str().unwrap();
+    if current_binary_name != "pocket-ic-server" {
+        panic!("The PocketIc server binary name must be \"pocket-ic-server\" (without quotes).")
+    }
+    // Check if `pocket-ic-server` is running in the canister sandbox mode where it waits
+    // for commands from the parent process. This check has to be performed
+    // before the arguments are parsed because the parent process does not pass
+    // all the normally required arguments of `pocket-ic-server`.
+    if std::env::args().any(|arg| arg == RUN_AS_CANISTER_SANDBOX_FLAG) {
+        canister_sandbox_main();
+    } else if std::env::args().any(|arg| arg == RUN_AS_SANDBOX_LAUNCHER_FLAG) {
+        sandbox_launcher_main();
+    } else if std::env::args().any(|arg| arg == RUN_AS_COMPILER_SANDBOX_FLAG) {
+        compiler_sandbox_main();
+    } else {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(16)
+            // we use the tokio rt to dispatch blocking operations in the background
+            .max_blocking_threads(16)
+            .build()
+            .expect("Failed to create tokio runtime!");
+        let runtime_arc = Arc::new(rt);
+        runtime_arc.block_on(async { start(runtime_arc.clone()).await });
+    }
 }
 
 async fn start(runtime: Arc<Runtime>) {
@@ -79,15 +110,21 @@ async fn start(runtime: Arc<Runtime>) {
     // If PocketIC was started with the `--pid` flag, create a port file to communicate the port back to
     // the parent process (e.g., the `cargo test` invocation). Other tests can then see this port file
     // and reuse the same PocketIC server.
-    let use_port_file = args.pid.is_some();
+    let use_port_file = args.pid.is_some() || args.port_file.is_some();
     let mut port_file_path = None;
-    let mut ready_file_path = None;
     let mut port_file = None;
+    let use_ready_file = args.pid.is_some();
+    let mut ready_file_path = None;
     if use_port_file {
-        port_file_path =
-            Some(std::env::temp_dir().join(format!("pocket_ic_{}.port", args.pid.unwrap())));
-        ready_file_path =
-            Some(std::env::temp_dir().join(format!("pocket_ic_{}.ready", args.pid.unwrap())));
+        if let Some(ref port_file) = args.port_file {
+            // Clean up port file.
+            let _ = std::fs::remove_file(port_file);
+        }
+        port_file_path = if args.port_file.is_some() {
+            args.port_file
+        } else {
+            Some(std::env::temp_dir().join(format!("pocket_ic_{}.port", args.pid.unwrap())))
+        };
         port_file = match create_file_atomically(port_file_path.clone().unwrap()) {
             Ok(f) => Some(f),
             Err(_) => {
@@ -96,10 +133,22 @@ async fn start(runtime: Arc<Runtime>) {
             }
         };
     }
+    if use_ready_file {
+        ready_file_path =
+            Some(std::env::temp_dir().join(format!("pocket_ic_{}.ready", args.pid.unwrap())));
+    }
+
+    let addr = format!("127.0.0.1:{}", args.port);
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to start PocketIC server on port {}", args.port));
+    let real_port = listener.local_addr().unwrap().port();
 
     let _guard = setup_tracing(args.pid);
     // The shared, mutable state of the PocketIC process.
-    let api_state = PocketIcApiStateBuilder::default().build();
+    let api_state = PocketIcApiStateBuilder::default()
+        .with_port(real_port)
+        .build();
     // A time-to-live mechanism: Requests bump this value, and the server
     // gracefully shuts down when the value wasn't bumped for a while.
     let min_alive_until = Arc::new(RwLock::new(Instant::now()));
@@ -127,8 +176,13 @@ async fn start(runtime: Arc<Runtime>) {
         // Verify signature.
         .directory_route("/verify_signature", post(verify_signature))
         //
+        // Read state: Poll a result based on a received Started{} reply.
+        .directory_route("/read_graph/:state_label/:op_id", get(handler_read_graph))
+        //
         // All instance routes.
         .nest("/instances", instances_routes::<AppState>())
+        // All HTTP gateway routes.
+        .nest("/http_gateway", http_gateway_routes::<AppState>())
         .layer(DefaultBodyLimit::disable())
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
@@ -144,11 +198,6 @@ async fn start(runtime: Arc<Runtime>) {
         ..OpenApi::default()
     };
 
-    let addr = format!("127.0.0.1:{}", args.port);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|_| panic!("Failed to start PocketIC server on port {}", args.port));
-    let real_port = listener.local_addr().unwrap().port();
     let router = router
         // Generate documentation
         .finish_api(&mut api)
@@ -165,6 +214,8 @@ async fn start(runtime: Arc<Runtime>) {
             .unwrap()
             .write_all(real_port.to_string().as_bytes());
         let _ = port_file.unwrap().flush();
+    }
+    if use_ready_file {
         // Signal that the port file can safely be read by other clients.
         let ready_file = create_file_atomically(ready_file_path.clone().unwrap());
         if ready_file.is_err() {
@@ -186,9 +237,12 @@ async fn start(runtime: Arc<Runtime>) {
         }
         info!("The PocketIC server will terminate");
         if use_port_file {
-            // Clean up port files.
-            let _ = std::fs::remove_file(ready_file_path.unwrap());
+            // Clean up port file.
             let _ = std::fs::remove_file(port_file_path.unwrap());
+        }
+        if use_ready_file {
+            // Clean up ready file.
+            let _ = std::fs::remove_file(ready_file_path.unwrap());
         }
     };
     axum::serve(listener, router)
@@ -283,6 +337,7 @@ async fn bump_last_request_timestamp(
     if *min_alive_until < alive_until {
         *min_alive_until = alive_until;
     }
+    drop(min_alive_until);
     next.run(request).await
 }
 

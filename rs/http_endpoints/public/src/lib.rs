@@ -4,8 +4,7 @@
 //!
 //! As much as possible the naming of structs in this module should match the
 //! naming used in the [Interface
-//! Specification](https://sdk.dfinity.org/docs/interface-spec/index.html)
-mod body;
+//! Specification](https://internetcomputer.org/docs/current/references/ic-interface-spec)
 mod catch_up_package;
 mod common;
 mod dashboard;
@@ -16,11 +15,10 @@ mod read_state;
 mod state_reader_executor;
 mod status;
 mod threads;
-mod types;
+mod tracing_flamegraph;
 
 pub use call::CallServiceBuilder;
 pub use query::QueryServiceBuilder;
-pub use read_state::canister::{CanisterReadStateService, CanisterReadStateServiceBuilder};
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "fuzzing_code")] {
@@ -35,34 +33,41 @@ cfg_if::cfg_if! {
 }
 
 use crate::{
-    body::BodyReceiverLayer,
     catch_up_package::CatchUpPackageService,
-    common::{
-        get_cors_headers, get_root_threshold_public_key, make_plaintext_response,
-        map_box_error_to_response,
-    },
+    common::{get_root_threshold_public_key, make_plaintext_response, map_box_error_to_response},
     dashboard::DashboardService,
     health_status_refresher::HealthStatusRefreshLayer,
-    metrics::{
-        LABEL_REQUEST_TYPE, LABEL_STATUS, REQUESTS_LABEL_NAMES, REQUESTS_NUM_LABELS, STATUS_ERROR,
-        STATUS_SUCCESS,
-    },
+    metrics::{LABEL_STATUS, REQUESTS_LABEL_NAMES, STATUS_ERROR, STATUS_SUCCESS},
     pprof::{PprofFlamegraphService, PprofHomeService, PprofProfileService},
     read_state::subnet::SubnetReadStateService,
     state_reader_executor::StateReaderExecutor,
     status::StatusService,
-    types::*,
+    tracing_flamegraph::TracingFlamegraphService,
 };
-use byte_unit::Byte;
+pub use common::cors_layer;
+
+use axum::{
+    body::Body,
+    error_handling::HandleErrorLayer,
+    extract::{DefaultBodyLimit, MatchedPath, State},
+    middleware::Next,
+    response::Redirect,
+    routing::{get, post_service},
+    Router,
+};
 use bytes::Bytes;
-use crossbeam::{atomic::AtomicCell, channel::Sender};
-use http::method::Method;
-use hyper::{server::conn::Http, Body, Request, Response, StatusCode};
-use ic_async_utils::{receive_body, start_tcp_listener};
+use crossbeam::atomic::AtomicCell;
+use http_body_util::{BodyExt, Full, LengthLimitError};
+use hyper::{body::Incoming, Request, Response, StatusCode};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server,
+};
+use ic_async_utils::start_tcp_listener;
 use ic_certification::validate_subnet_delegation_certificate;
 use ic_config::http_handler::Config;
 use ic_crypto_interfaces_sig_verification::IngressSigVerifier;
-use ic_crypto_tls_interfaces::{TlsHandshake, TlsStream};
+use ic_crypto_tls_interfaces::{TlsConfig, TlsHandshake};
 use ic_crypto_tree_hash::{lookup_path, LabeledTree, Path};
 use ic_crypto_utils_threshold_sig_der::parse_threshold_sig_key_from_der;
 use ic_interfaces::{
@@ -82,6 +87,7 @@ use ic_registry_client_helpers::{
 };
 use ic_registry_subnet_type::SubnetType;
 use ic_replicated_state::ReplicatedState;
+use ic_tracing::ReloadHandles;
 use ic_types::{
     artifact::UnvalidatedArtifactMutation,
     artifact_kind::IngressArtifact,
@@ -91,32 +97,45 @@ use ic_types::{
         HttpReadStateResponse, HttpRequestEnvelope, QueryResponseHash, ReplicaHealthStatus,
     },
     time::expiry_time_from_now,
-    NodeId, PrincipalId, SubnetId,
+    NodeId, SubnetId,
 };
 use metrics::{HttpHandlerMetrics, LABEL_UNKNOWN};
 use rand::Rng;
+pub use read_state::canister::{CanisterReadStateService, CanisterReadStateServiceBuilder};
 use std::{
     convert::{Infallible, TryFrom},
     io::Write,
     net::SocketAddr,
     path::PathBuf,
-    str::FromStr,
     sync::{Arc, RwLock},
     time::Duration,
 };
 use strum::{Display, IntoStaticStr};
 use tempfile::NamedTempFile;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
-use tokio::time::{sleep, timeout, Instant};
+use thiserror::Error;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+    sync::mpsc::UnboundedSender,
+    time::{sleep, timeout, Instant},
+};
 use tokio_io_timeout::TimeoutStream;
+use tokio_rustls::server::TlsStream;
 use tower::{
     limit::GlobalConcurrencyLimitLayer, service_fn, util::BoxCloneService, BoxError, Service,
     ServiceBuilder, ServiceExt,
 };
+use tower_http::limit::RequestBodyLimitLayer;
 
-const HTTP_DASHBOARD_URL_PATH: &str = "/_/dashboard";
 const CONTENT_TYPE_CBOR: &str = "application/cbor";
+
+/// [TLS Application-Layer Protocol Negotiation (ALPN) Protocol `HTTP/2 over TLS` ID][spec]
+/// [spec]: https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml#alpn-protocol-ids)
+const ALPN_HTTP2: &[u8; 2] = b"h2";
+
+/// [TLS Application-Layer Protocol Negotiation (ALPN) Protocol `HTTP/1.1` ID][spec]
+/// [spec]: https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml#alpn-protocol-ids)
+const ALPN_HTTP1_1: &[u8; 8] = b"http/1.1";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpError {
@@ -124,21 +143,22 @@ pub struct HttpError {
     pub message: String,
 }
 
-pub(crate) type EndpointService = BoxCloneService<Request<Bytes>, Response<Body>, Infallible>;
+pub(crate) type EndpointService = BoxCloneService<Request<Body>, Response<Body>, Infallible>;
 
 /// Struct that holds all endpoint services.
 #[derive(Clone)]
 struct HttpHandler {
-    call_service: EndpointService,
-    query_service: EndpointService,
+    call_router: Router,
+    query_router: Router,
     catchup_service: EndpointService,
-    dashboard_service: EndpointService,
-    status_service: EndpointService,
-    canister_read_state_service: EndpointService,
-    subnet_read_state_service: EndpointService,
-    pprof_home_service: EndpointService,
-    pprof_profile_service: EndpointService,
-    pprof_flamegraph_service: EndpointService,
+    dashboard_router: Router,
+    status_router: Router,
+    canister_read_state_router: Router,
+    subnet_read_state_router: Router,
+    pprof_home_router: Router,
+    pprof_profile_router: Router,
+    pprof_flamegraph_router: Router,
+    tracing_flamegraph_router: Router,
 }
 
 // Crates a detached tokio blocking task that initializes the server (reading
@@ -261,10 +281,11 @@ pub fn start_server(
     ingress_filter: IngressFilterService,
     query_execution_service: QueryExecutionService,
     ingress_throttler: Arc<RwLock<dyn IngressPoolThrottler + Send + Sync>>,
-    ingress_tx: Sender<UnvalidatedArtifactMutation<IngressArtifact>>,
+    ingress_tx: UnboundedSender<UnvalidatedArtifactMutation<IngressArtifact>>,
     state_reader: Arc<dyn StateReader<State = ReplicatedState>>,
     query_signer: Arc<dyn BasicSigner<QueryResponseHash> + Send + Sync>,
     registry_client: Arc<dyn RegistryClient>,
+    tls_config: Arc<dyn TlsConfig + Send + Sync>,
     tls_handshake: Arc<dyn TlsHandshake + Send + Sync>,
     ingress_verifier: Arc<dyn IngressSigVerifier + Send + Sync>,
     node_id: NodeId,
@@ -276,6 +297,7 @@ pub fn start_server(
     malicious_flags: MaliciousFlags,
     delegation_from_nns: Option<CertificateDelegation>,
     pprof_collector: Arc<dyn PprofCollector>,
+    tracing_handle: ReloadHandles,
 ) {
     let listen_addr = config.listen_addr;
     info!(log, "Starting HTTP server...");
@@ -297,101 +319,63 @@ pub fn start_server(
     let health_status = Arc::new(AtomicCell::new(ReplicaHealthStatus::Starting));
     let state_reader_clone = state_reader.clone();
     let state_reader_executor = StateReaderExecutor::new(state_reader);
-    let call_service = BoxCloneService::new(
-        ServiceBuilder::new()
-            .layer(GlobalConcurrencyLimitLayer::new(
-                config.max_call_concurrent_requests,
-            ))
-            .service(
-                CallServiceBuilder::builder(
-                    node_id,
-                    subnet_id,
-                    registry_client.clone(),
-                    ingress_verifier.clone(),
-                    ingress_filter,
-                    ingress_throttler,
-                    ingress_tx,
-                )
-                .with_logger(log.clone())
-                .with_metrics(metrics.clone())
-                .with_malicious_flags(malicious_flags.clone())
-                .build(),
-            ),
-    );
-    let query_service = BoxCloneService::new(
-        ServiceBuilder::new()
-            .layer(GlobalConcurrencyLimitLayer::new(
-                config.max_query_concurrent_requests,
-            ))
-            .service(
-                QueryServiceBuilder::builder(
-                    node_id,
-                    query_signer,
-                    registry_client.clone(),
-                    ingress_verifier.clone(),
-                    delegation_from_nns.clone(),
-                    query_execution_service,
-                )
-                .with_logger(log.clone())
-                .with_health_status(health_status.clone())
-                .with_metrics(metrics.clone())
-                .with_malicious_flags(malicious_flags.clone())
-                .build(),
-            ),
-    );
+    let call_router = CallServiceBuilder::builder(
+        node_id,
+        subnet_id,
+        registry_client.clone(),
+        ingress_verifier.clone(),
+        ingress_filter,
+        ingress_throttler,
+        ingress_tx,
+    )
+    .with_logger(log.clone())
+    .with_malicious_flags(malicious_flags.clone())
+    .build_router();
+    let query_router = QueryServiceBuilder::builder(
+        node_id,
+        query_signer,
+        registry_client.clone(),
+        ingress_verifier.clone(),
+        delegation_from_nns.clone(),
+        query_execution_service,
+    )
+    .with_logger(log.clone())
+    .with_health_status(health_status.clone())
+    .with_malicious_flags(malicious_flags.clone())
+    .build_router();
 
-    let canister_read_state_service = BoxCloneService::new(
-        ServiceBuilder::new()
-            .layer(GlobalConcurrencyLimitLayer::new(
-                config.max_read_state_concurrent_requests,
-            ))
-            .service(
-                CanisterReadStateServiceBuilder::builder(
-                    state_reader_clone,
-                    registry_client.clone(),
-                    ingress_verifier,
-                    delegation_from_nns.clone(),
-                )
-                .with_logger(log.clone())
-                .with_health_status(health_status.clone())
-                .with_metrics(metrics.clone())
-                .with_malicious_flags(malicious_flags)
-                .build(),
-            ),
-    );
+    let canister_read_state_router = CanisterReadStateServiceBuilder::builder(
+        state_reader_clone,
+        registry_client.clone(),
+        ingress_verifier,
+        delegation_from_nns.clone(),
+    )
+    .with_logger(log.clone())
+    .with_health_status(health_status.clone())
+    .with_malicious_flags(malicious_flags)
+    .build_router();
 
-    let subnet_read_state_service = SubnetReadStateService::new_service(
-        config.clone(),
-        log.clone(),
-        metrics.clone(),
+    let subnet_read_state_router = SubnetReadStateService::new_router(
         Arc::clone(&health_status),
         Arc::clone(&delegation_from_nns),
         state_reader_executor.clone(),
     );
-    let status_service = StatusService::new_service(
-        config.clone(),
+    let status_router = StatusService::build_router(
         log.clone(),
         nns_subnet_id,
         Arc::clone(&registry_client),
         Arc::clone(&health_status),
         state_reader_executor.clone(),
     );
-    let dashboard_service =
-        DashboardService::new_service(config.clone(), subnet_type, state_reader_executor.clone());
-    let catchup_service = CatchUpPackageService::new_service(
-        config.clone(),
-        metrics.clone(),
-        consensus_pool_cache.clone(),
-    );
+    let dashboard_router =
+        DashboardService::new_router(config.clone(), subnet_type, state_reader_executor.clone());
+    let catchup_service = CatchUpPackageService::new_service(consensus_pool_cache.clone());
 
-    let pprof_concurrency_buffer =
-        GlobalConcurrencyLimitLayer::new(config.max_pprof_concurrent_requests);
+    let pprof_home_router = PprofHomeService::new_router();
+    let pprof_profile_router = PprofProfileService::new_router(pprof_collector.clone());
+    let pprof_flamegraph_router = PprofFlamegraphService::new_router(pprof_collector);
 
-    let pprof_home_service = PprofHomeService::new_service(pprof_concurrency_buffer.clone());
-    let pprof_profile_service =
-        PprofProfileService::new_service(pprof_collector.clone(), pprof_concurrency_buffer.clone());
-    let pprof_flamegraph_service =
-        PprofFlamegraphService::new_service(pprof_collector, pprof_concurrency_buffer);
+    let tracing_flamegraph_router = TracingFlamegraphService::build_router(tracing_handle);
 
     let health_status_refresher = HealthStatusRefreshLayer::new(
         log.clone(),
@@ -416,16 +400,17 @@ pub fn start_server(
     );
 
     let http_handler = HttpHandler {
-        call_service,
-        query_service,
-        status_service,
+        call_router,
+        query_router,
+        status_router,
         catchup_service,
-        dashboard_service,
-        canister_read_state_service,
-        subnet_read_state_service,
-        pprof_home_service,
-        pprof_profile_service,
-        pprof_flamegraph_service,
+        dashboard_router,
+        canister_read_state_router,
+        subnet_read_state_router,
+        pprof_home_router,
+        pprof_profile_router,
+        pprof_flamegraph_router,
+        tracing_flamegraph_router,
     };
     let main_service = create_main_service(
         metrics.clone(),
@@ -450,7 +435,7 @@ pub fn start_server(
             config.clone(),
             main_service.clone(),
             tcp_stream,
-            tls_handshake.clone(),
+            tls_config.clone(),
             registry_client.clone(),
             metrics_cl.clone(),
         )
@@ -460,6 +445,9 @@ pub fn start_server(
         loop {
             match tcp_listener.accept().await {
                 Ok((tcp_stream, _)) => {
+                    if let Err(err) = tcp_stream.set_nodelay(true) {
+                        error!(log, "Failed to set nodelay, error = {}", err);
+                    }
                     metrics.connections_total.inc();
                     // Start recording connection setup duration.
                     let mut conn_svc = conn_svc.clone();
@@ -492,46 +480,28 @@ fn create_main_service(
     config: Config,
     http_handler: HttpHandler,
     health_status_refresher: HealthStatusRefreshLayer,
-) -> BoxCloneService<Request<Body>, Response<Body>, Infallible> {
-    let route_service = service_fn(move |req: RequestWithTimer| {
-        let http_handler = http_handler.clone();
-        let config = config.clone();
-        async move { Ok::<_, Infallible>(make_router(http_handler, config, req).await) }
+) -> BoxCloneService<Request<Incoming>, Response<Body>, Infallible> {
+    let res = make_router(http_handler, config, metrics, health_status_refresher);
+    let route_service = service_fn(move |req: Request<Incoming>| {
+        let mut r = res.clone();
+
+        async move {
+            r.as_service()
+                .map_response(|r| r.map(|b| Body::new(b.map_err(BoxError::from))))
+                .oneshot(req)
+                .await
+        }
     });
 
-    BoxCloneService::new(
-        ServiceBuilder::new()
-            // Attach a timer as soon as we see a request.
-            .map_request(move |request| {
-                let _ = &metrics;
-                // Start recording request duration.
-                let request_timer = HistogramVecTimer::start_timer(
-                    metrics.requests.clone(),
-                    &REQUESTS_LABEL_NAMES,
-                    [LABEL_UNKNOWN, LABEL_UNKNOWN],
-                );
-                (request, request_timer)
-            })
-            .layer(health_status_refresher)
-            .service(route_service)
-            .map_result(move |result| {
-                let (response, request_timer) = result.expect("Can't panic on infallible");
-                let status = response.status();
-                // This is a workaround for `StatusCode::as_str()` not returning a `&'static
-                // str`. It ensures `request_timer` is dropped before `status`.
-                let mut timer = request_timer;
-                timer.set_label(LABEL_STATUS, status.as_str());
-                Ok::<_, Infallible>(response)
-            }),
-    )
+    BoxCloneService::new(route_service)
 }
 
 async fn handshake_and_serve_connection(
     log: ReplicaLogger,
     config: Config,
-    service: BoxCloneService<Request<Body>, Response<Body>, Infallible>,
+    service: BoxCloneService<Request<Incoming>, Response<Body>, Infallible>,
     tcp_stream: TcpStream,
-    tls_handshake: Arc<dyn TlsHandshake + Send + Sync>,
+    tls_config: Arc<dyn TlsConfig + Send + Sync>,
     registry_client: Arc<dyn RegistryClient>,
     metrics: HttpHandlerMetrics,
 ) -> Result<(), Infallible> {
@@ -541,7 +511,7 @@ async fn handshake_and_serve_connection(
         &log,
         config.connection_read_timeout_seconds,
         tcp_stream,
-        tls_handshake,
+        tls_config,
         registry_client,
     )
     .await;
@@ -610,17 +580,20 @@ async fn handshake_and_serve_connection(
 #[strum(serialize_all = "snake_case")]
 enum ConnType {
     #[strum(serialize = "secure")]
-    Secure(Box<dyn TlsStream>),
+    Secure(TlsStream<TcpStream>),
     #[strum(serialize = "insecure")]
     Insecure(TcpStream),
 }
 
-#[derive(IntoStaticStr, Debug)]
+#[derive(Error, Debug, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum ConnError {
-    #[strum(serialize = "tls_handshake")]
-    TlsHandshake,
+    #[strum(serialize = "tls_handshake_failed")]
+    #[error("TLS Handshake failed: {0}")]
+    TlsHandshakeFailed(std::io::Error),
+    #[error("IO error.")]
     Io,
+    #[error("Timeout while trying to connect.")]
     Timeout,
 }
 
@@ -628,9 +601,11 @@ async fn stream_after_handshake(
     log: &ReplicaLogger,
     connection_read_timeout_seconds: u64,
     tcp_stream: TcpStream,
-    tls_handshake: Arc<dyn TlsHandshake + Send + Sync>,
+    tls_config: Arc<dyn TlsConfig + Send + Sync>,
     registry_client: Arc<dyn RegistryClient>,
 ) -> Result<ConnType, ConnError> {
+    use tokio_rustls::TlsAcceptor;
+
     let mut b = [0_u8; 1];
     match timeout(
         Duration::from_secs(connection_read_timeout_seconds),
@@ -641,19 +616,17 @@ async fn stream_after_handshake(
         // The peek operation was successful within the timeout.
         Ok(Ok(_)) => {
             if b[0] == 22 {
-                match tls_handshake
-                    .perform_tls_server_handshake_without_client_auth(
-                        tcp_stream,
-                        registry_client.get_latest_version(),
-                    )
+                let mut config = tls_config
+                    .server_config_without_client_auth(registry_client.get_latest_version())
+                    .unwrap();
+
+                config.alpn_protocols = vec![ALPN_HTTP2.to_vec(), ALPN_HTTP1_1.to_vec()];
+
+                TlsAcceptor::from(Arc::new(config))
+                    .accept(tcp_stream)
                     .await
-                {
-                    Err(err) => {
-                        warn!(log, "TLS handshaked failed with: {:?}", err);
-                        Err(ConnError::TlsHandshake)
-                    }
-                    Ok(tls_stream) => Ok(ConnType::Secure(tls_stream)),
-                }
+                    .map(ConnType::Secure)
+                    .map_err(ConnError::TlsHandshakeFailed)
             } else {
                 Ok(ConnType::Insecure(tcp_stream))
             }
@@ -666,219 +639,268 @@ async fn stream_after_handshake(
     }
 }
 
-async fn serve_connection_with_read_timeout<T: AsyncRead + AsyncWrite + 'static>(
+async fn serve_connection_with_read_timeout<T: AsyncRead + AsyncWrite + Unpin + 'static>(
     stream: T,
-    metrics_svc: BoxCloneService<Request<Body>, Response<Body>, Infallible>,
+    metrics_svc: BoxCloneService<Request<Incoming>, Response<Body>, Infallible>,
     connection_read_timeout_seconds: u64,
-) -> Result<(), hyper::Error> {
-    let http = Http::new();
+) -> Result<(), BoxError> {
     let mut stream = TimeoutStream::new(stream);
     stream.set_read_timeout(Some(Duration::from_secs(connection_read_timeout_seconds)));
     let stream = Box::pin(stream);
-    http.serve_connection(stream, metrics_svc).await
+
+    let stream = TokioIo::new(stream);
+
+    let hyper_service = hyper::service::service_fn(move |request: Request<Incoming>| {
+        metrics_svc.clone().oneshot(request)
+    });
+    server::conn::auto::Builder::new(TokioExecutor::new())
+        .serve_connection(stream, hyper_service)
+        .await
 }
 
-type RequestWithTimer = (
-    Request<Body>,
-    HistogramVecTimer<'static, REQUESTS_NUM_LABELS>,
-);
-type ResponseWithTimer = (
-    Response<Body>,
-    HistogramVecTimer<'static, REQUESTS_NUM_LABELS>,
-);
-
-async fn make_router(
+fn make_router(
     http_handler: HttpHandler,
     config: Config,
-    (mut req, mut timer): RequestWithTimer,
-) -> ResponseWithTimer {
-    let call_service = http_handler.call_service.clone();
-    let query_service = http_handler.query_service.clone();
-    let status_service = http_handler.status_service.clone();
+    metrics: HttpHandlerMetrics,
+    health_status_refresher: HealthStatusRefreshLayer,
+) -> Router {
     let catch_up_package_service = http_handler.catchup_service.clone();
-    let dashboard_service = http_handler.dashboard_service.clone();
-    let canister_read_state_service = http_handler.canister_read_state_service.clone();
-    let subnet_read_state_service = http_handler.subnet_read_state_service.clone();
-    let pprof_home_service = http_handler.pprof_home_service.clone();
-    let pprof_profile_service = http_handler.pprof_profile_service.clone();
-    let pprof_flamegraph_service = http_handler.pprof_flamegraph_service.clone();
 
-    let svc = match req.method().clone() {
-        Method::POST => {
-            // Check the content-type header
-            if !req
-                .headers()
-                .get_all(http::header::CONTENT_TYPE)
-                .iter()
-                .any(|value| {
-                    if let Ok(v) = value.to_str() {
-                        return v.to_lowercase() == CONTENT_TYPE_CBOR;
-                    }
-                    false
-                })
-            {
-                timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::InvalidArgument.into());
-                return (
-                    make_plaintext_response(
-                        StatusCode::BAD_REQUEST,
-                        format!("Unexpected content-type, expected {}.", CONTENT_TYPE_CBOR),
-                    ),
-                    timer,
-                );
-            }
+    let post_router: Router = Router::new().route(
+        "/_/catch_up_package",
+        post_service(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(map_box_error_to_response))
+                .load_shed()
+                .layer(GlobalConcurrencyLimitLayer::new(
+                    config.max_catch_up_package_concurrent_requests,
+                ))
+                .layer(axum::middleware::from_fn(verify_cbor_content_header))
+                .service(catch_up_package_service),
+        ),
+    );
 
-            // Check the path
-            let path = req.uri().path();
-            let (svc, effective_principal_id) =
-                match *path.split('/').collect::<Vec<&str>>().as_slice() {
-                    ["", "api", "v2", "canister", effective_canister_id, "call"] => {
-                        timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::Call.into());
-                        (
-                            call_service,
-                            Some(
-                                PrincipalId::from_str(effective_canister_id)
-                                    .map_err(|err| (effective_canister_id, err.to_string())),
-                            ),
-                        )
-                    }
-                    ["", "api", "v2", "canister", effective_canister_id, "query"] => {
-                        timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::Query.into());
-                        (
-                            query_service,
-                            Some(
-                                PrincipalId::from_str(effective_canister_id)
-                                    .map_err(|err| (effective_canister_id, err.to_string())),
-                            ),
-                        )
-                    }
-                    ["", "api", "v2", "canister", effective_canister_id, "read_state"] => {
-                        timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::ReadState.into());
-                        (
-                            canister_read_state_service,
-                            Some(
-                                PrincipalId::from_str(effective_canister_id)
-                                    .map_err(|err| (effective_canister_id, err.to_string())),
-                            ),
-                        )
-                    }
-                    ["", "api", "v2", "subnet", subnet_id, "read_state"] => {
-                        timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::ReadState.into());
-                        (
-                            subnet_read_state_service,
-                            Some(
-                                PrincipalId::from_str(subnet_id)
-                                    .map_err(|err| (subnet_id, err.to_string())),
-                            ),
-                        )
-                    }
-                    ["", "_", "catch_up_package"] => {
-                        timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::CatchUpPackage.into());
-                        (catch_up_package_service, None)
-                    }
-                    _ => {
-                        timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::InvalidArgument.into());
-                        return (
-                            make_plaintext_response(
-                                StatusCode::NOT_FOUND,
-                                "Unexpected POST request path.".to_string(),
-                            ),
-                            timer,
-                        );
-                    }
-                };
+    let pprof_concurrency_limiter =
+        GlobalConcurrencyLimitLayer::new(config.max_pprof_concurrent_requests);
 
-            // If url contains effective principal id we attach it to the request.
-            if let Some(effective_principal_id) = effective_principal_id {
-                match effective_principal_id {
-                    Ok(id) => {
-                        req.extensions_mut().insert(id);
-                    }
-                    Err((id, e)) => {
-                        return (
-                            make_plaintext_response(
-                                StatusCode::BAD_REQUEST,
-                                format!(
-                                    "Malformed request: Invalid efffective principal id {}: {}",
-                                    id, e
-                                ),
-                            ),
-                            timer,
-                        );
-                    }
-                }
-            }
-            svc
-        }
-        Method::GET => match req.uri().path() {
-            "/api/v2/status" => {
-                timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::Status.into());
-                status_service
-            }
-            "/" | "/_/" => {
-                timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::RedirectToDashboard.into());
-                return (redirect_to_dashboard_response(), timer);
-            }
-            HTTP_DASHBOARD_URL_PATH => {
-                timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::Dashboard.into());
-                dashboard_service
-            }
-            "/_/pprof" => {
-                timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::PprofHome.into());
-                pprof_home_service
-            }
-            "/_/pprof/profile" => {
-                timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::PprofProfile.into());
-                pprof_profile_service
-            }
-            "/_/pprof/flamegraph" => {
-                timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::PprofFlamegraph.into());
-                pprof_flamegraph_service
-            }
-            "/_/threads" => {
-                timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::Threads.into());
-                return (threads::collect().await, timer);
-            }
-            _ => {
-                timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::InvalidArgument.into());
-                return (
-                    make_plaintext_response(
-                        StatusCode::NOT_FOUND,
-                        "Unexpected GET request path.".to_string(),
-                    ),
-                    timer,
-                );
-            }
-        },
-        Method::OPTIONS => {
-            timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::Options.into());
-            return (no_content_response(), timer);
-        }
-        _ => {
-            timer.set_label(LABEL_REQUEST_TYPE, ApiReqType::InvalidArgument.into());
-            return (
-                make_plaintext_response(
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    format!(
-                        "Unsupported method: {}. supported methods: POST, GET, OPTIONS.",
-                        req.method()
-                    ),
-                ),
-                timer,
-            );
-        }
-    };
-    let svc_per_conn = ServiceBuilder::new()
-        .load_shed()
-        .timeout(Duration::from_secs(config.request_timeout_seconds))
-        .layer(BodyReceiverLayer::new(&config))
-        .service(svc);
-    (
-        svc_per_conn
-            .oneshot(req)
-            .await
-            .unwrap_or_else(map_box_error_to_response),
-        timer,
+    let get_router = Router::new()
+        // TODO this is 303 instead of 302
+        .route(
+            "/",
+            get(|| async { Redirect::to(DashboardService::route()) }),
+        )
+        .route(
+            "/_/",
+            get(|| async { Redirect::to(DashboardService::route()) }),
+        )
+        .fallback(|| async {
+            make_plaintext_response(StatusCode::NOT_FOUND, "Endpoint not found.".to_string())
+        });
+
+    let final_router = get_router
+        .merge(post_router)
+        .merge(
+            http_handler.status_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(GlobalConcurrencyLimitLayer::new(
+                        config.max_status_concurrent_requests,
+                    )),
+            ),
+        )
+        .merge(
+            http_handler.call_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(GlobalConcurrencyLimitLayer::new(
+                        config.max_call_concurrent_requests,
+                    )),
+            ),
+        )
+        .merge(
+            http_handler.query_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(GlobalConcurrencyLimitLayer::new(
+                        config.max_query_concurrent_requests,
+                    )),
+            ),
+        )
+        .merge(
+            http_handler.subnet_read_state_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(GlobalConcurrencyLimitLayer::new(
+                        config.max_read_state_concurrent_requests,
+                    )),
+            ),
+        )
+        .merge(
+            http_handler.canister_read_state_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(GlobalConcurrencyLimitLayer::new(
+                        config.max_read_state_concurrent_requests,
+                    )),
+            ),
+        )
+        .merge(
+            http_handler.dashboard_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(GlobalConcurrencyLimitLayer::new(
+                        config.max_dashboard_concurrent_requests,
+                    )),
+            ),
+        )
+        .merge(
+            http_handler.pprof_home_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(pprof_concurrency_limiter.clone()),
+            ),
+        )
+        .merge(
+            http_handler.pprof_flamegraph_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(pprof_concurrency_limiter.clone()),
+            ),
+        )
+        .merge(
+            http_handler.pprof_profile_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(pprof_concurrency_limiter.clone()),
+            ),
+        )
+        .merge(
+            http_handler.tracing_flamegraph_router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(map_box_error_to_response))
+                    .load_shed()
+                    .layer(GlobalConcurrencyLimitLayer::new(
+                        config.max_tracing_flamegraph_concurrent_requests,
+                    )),
+            ),
+        );
+
+    final_router.layer(
+        ServiceBuilder::new()
+            .layer(HandleErrorLayer::new(map_box_error_to_response))
+            .layer(health_status_refresher.clone())
+            .load_shed()
+            .timeout(Duration::from_secs(config.request_timeout_seconds))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(metrics),
+                collect_timer_metric,
+            ))
+            // Disable default limit since apply a request limit to all routes.
+            .layer(DefaultBodyLimit::disable())
+            .layer(RequestBodyLimitLayer::new(
+                config.max_request_size_bytes as usize,
+            ))
+            .layer(cors_layer()),
     )
+}
+
+async fn verify_cbor_content_header(
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    if !request
+        .headers()
+        .get_all(http::header::CONTENT_TYPE)
+        .iter()
+        .any(|value| {
+            if let Ok(v) = value.to_str() {
+                return v.to_lowercase() == CONTENT_TYPE_CBOR;
+            }
+            false
+        })
+    {
+        return make_plaintext_response(
+            StatusCode::BAD_REQUEST,
+            format!("Unexpected content-type, expected {}.", CONTENT_TYPE_CBOR),
+        );
+    }
+
+    next.run(request).await
+}
+
+async fn collect_timer_metric(
+    State(metrics): State<Arc<HttpHandlerMetrics>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    use http_body::Body;
+
+    let path = if let Some(matched_path) = request.extensions().get::<MatchedPath>() {
+        matched_path.as_str().to_owned()
+    } else {
+        request.uri().path().to_owned()
+    };
+
+    let http_version = format!("{:?}", request.version());
+
+    metrics
+        .request_http_version_counts
+        .with_label_values(&[&http_version])
+        .inc();
+
+    metrics
+        .request_body_size_bytes
+        .with_label_values(&[&path, LABEL_UNKNOWN])
+        .observe(request.body().size_hint().lower() as f64);
+
+    let request_timer = HistogramVecTimer::start_timer(
+        metrics.requests.clone(),
+        &REQUESTS_LABEL_NAMES,
+        [&path, LABEL_UNKNOWN],
+    );
+
+    let resp = next.run(request).await;
+
+    let status = resp.status();
+    // This is a workaround for `StatusCode::as_str()` not returning a `&'static
+    // str`. It ensures `request_timer` is dropped before `status`.
+    let mut timer = request_timer;
+    timer.set_label(LABEL_STATUS, status.as_str());
+
+    metrics
+        .response_body_size_bytes
+        .with_label_values(&[&path])
+        .observe(resp.body().size_hint().lower() as f64);
+    resp
+}
+
+async fn receive_request_body(body: Body) -> Result<Bytes, Response<Body>> {
+    match body.collect().await.map_err(|e| e.into_inner()) {
+        Ok(b) => Ok(b.to_bytes()),
+        Err(e) if e.is::<LengthLimitError>() => {
+            let res = make_plaintext_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Http body too large".to_string(),
+            );
+            Err(res)
+        }
+        Err(_) => {
+            let res = make_plaintext_response(
+                StatusCode::BAD_REQUEST,
+                "Unable to receive http body".to_string(),
+            );
+            Err(res)
+        }
+    }
 }
 
 // Fetches a delegation from the NNS subnet to allow this subnet to issue
@@ -1003,7 +1025,8 @@ async fn try_fetch_delegation_from_nns(
         .await
         .map_err(|err| format!("TLS handshake failed: {:?}.", err))?;
 
-    let (mut request_sender, connection) = hyper::client::conn::handshake(tls_handshake).await?;
+    let (mut request_sender, connection) =
+        hyper::client::conn::http1::handshake(TokioIo::new(tls_handshake)).await?;
 
     let log_clone = log.clone();
 
@@ -1028,16 +1051,37 @@ async fn try_fetch_delegation_from_nns(
         .method(hyper::Method::POST)
         .uri(uri)
         .header(hyper::header::CONTENT_TYPE, CONTENT_TYPE_CBOR)
-        .body(Body::from(body))?;
+        .body(Body::new(Full::from(body).map_err(BoxError::from)))?;
 
     let raw_response_res = request_sender.send_request(nns_request).await?;
 
-    let raw_response = receive_body(
-        raw_response_res.into_body(),
+    let raw_response = match timeout(
         Duration::from_secs(config.max_request_receive_seconds),
-        Byte::from_bytes(config.max_delegation_certificate_size_bytes.into()),
+        http_body_util::Limited::new(
+            raw_response_res.into_body(),
+            config.max_delegation_certificate_size_bytes as usize,
+        )
+        .collect(),
     )
-    .await?;
+    .await
+    {
+        Ok(Ok(c)) => c.to_bytes(),
+        Ok(Err(e)) if e.is::<LengthLimitError>() => {
+            return Err(format!(
+                "Http body exceeds size limit of {} bytes.",
+                config.max_delegation_certificate_size_bytes
+            )
+            .into())
+        }
+        Ok(Err(e)) => return Err(format!("Failed to read body from connection: {}", e).into()),
+        Err(e) => {
+            return Err(format!(
+                "Timeout of {}s reached while receiving http body: {}",
+                config.max_request_receive_seconds, e
+            )
+            .into())
+        }
+    };
 
     debug!(log, "Response from nns subnet: {:?}", raw_response);
 
@@ -1138,32 +1182,332 @@ async fn get_random_node_from_nns_subnet(
     }
 }
 
-fn no_content_response() -> Response<Body> {
-    let mut response = Response::new(Body::from(""));
-    *response.status_mut() = StatusCode::NO_CONTENT;
-    *response.headers_mut() = get_cors_headers();
-    response
-}
-
-fn redirect_to_dashboard_response() -> Response<Body> {
-    // The empty string is simply to uniformize the return type with the cases where
-    // the response is not empty.
-    let mut response = Response::new(Body::from(""));
-    *response.status_mut() = StatusCode::FOUND;
-    response.headers_mut().insert(
-        hyper::header::LOCATION,
-        hyper::header::HeaderValue::from_static(HTTP_DASHBOARD_URL_PATH),
-    );
-    response
-}
-
 #[cfg(test)]
 mod tests {
+    use futures_util::{future::select_all, stream::pending, FutureExt};
+    use http::{
+        header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+            ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE,
+        },
+        HeaderName, HeaderValue, Method,
+    };
+    use http_body_util::Empty;
+    use ic_interfaces_mocks::consensus_pool::MockConsensusPoolCache;
+    use ic_interfaces_state_manager_mocks::MockStateManager;
+    use ic_logger::replica_logger::no_op_logger;
+    use ic_types::{CanisterId, Height};
+
+    use crate::{call::CallService, query::QueryService};
+
     use super::*;
+
+    fn dummy_router(config: Config) -> Router {
+        let dummy_service = BoxCloneService::new(service_fn(|req: Request<Body>| async move {
+            match receive_request_body(req.into_body()).await {
+                Ok(_) => Ok(Response::new(Body::new("success".to_string()))),
+                Err(e) => Ok(e),
+            }
+        }));
+        let http_handler = HttpHandler {
+            call_router: Router::new().route(
+                CallService::route(),
+                axum::routing::post_service(dummy_service.clone()),
+            ),
+            query_router: Router::new().route(
+                QueryService::route(),
+                axum::routing::post_service(dummy_service.clone()),
+            ),
+            catchup_service: dummy_service.clone(),
+            dashboard_router: Router::new().route(
+                DashboardService::route(),
+                axum::routing::get_service(dummy_service.clone()),
+            ),
+            status_router: Router::new().route(
+                StatusService::route(),
+                axum::routing::get_service(dummy_service.clone()),
+            ),
+            canister_read_state_router: Router::new().route(
+                CanisterReadStateService::route(),
+                axum::routing::post_service(dummy_service.clone()),
+            ),
+            subnet_read_state_router: Router::new().route(
+                SubnetReadStateService::route(),
+                axum::routing::post_service(dummy_service.clone()),
+            ),
+            pprof_home_router: Router::new().route(
+                PprofHomeService::route(),
+                axum::routing::get_service(dummy_service.clone()),
+            ),
+            pprof_profile_router: Router::new().route(
+                PprofProfileService::route(),
+                axum::routing::get_service(dummy_service.clone()),
+            ),
+            pprof_flamegraph_router: Router::new().route(
+                PprofFlamegraphService::route(),
+                axum::routing::get_service(dummy_service.clone()),
+            ),
+            tracing_flamegraph_router: Router::new().route(
+                TracingFlamegraphService::route(),
+                axum::routing::get_service(dummy_service.clone()),
+            ),
+        };
+
+        let metrics = HttpHandlerMetrics::new(&MetricsRegistry::default());
+
+        let mut state_reader_executor = MockStateManager::new();
+        state_reader_executor
+            .expect_latest_certified_height()
+            .return_const(Height::from(1));
+
+        let mut consensus_pool_cache = MockConsensusPoolCache::new();
+        consensus_pool_cache
+            .expect_is_replica_behind()
+            .return_const(false);
+
+        make_router(
+            http_handler,
+            config,
+            metrics.clone(),
+            HealthStatusRefreshLayer::new(
+                no_op_logger(),
+                metrics,
+                Arc::new(AtomicCell::new(ReplicaHealthStatus::Healthy)),
+                Arc::new(consensus_pool_cache),
+                StateReaderExecutor::new(Arc::new(state_reader_executor)),
+            ),
+        )
+    }
+
+    /// Request that takes forever to read.
+    fn infinite_request(
+        uri: String,
+        method: Method,
+        header: Option<(HeaderName, &str)>,
+    ) -> Request<Body> {
+        let mut r = Request::builder()
+            .uri(uri)
+            .method(method)
+            .body(Body::from_stream(pending::<Result<Bytes, Infallible>>()))
+            .unwrap();
+        if let Some((k, v)) = header {
+            r.headers_mut().append(k, HeaderValue::from_str(v).unwrap());
+        }
+        r
+    }
 
     // Verify that ReplicatedStateHealth is represented as an atomic by crossbeam.
     #[test]
     fn test_replica_state_atomic() {
         assert!(AtomicCell::<ReplicaHealthStatus>::is_lock_free());
+    }
+
+    #[tokio::test]
+    async fn payload_too_large_without_content_length() {
+        let router = dummy_router(Config {
+            max_request_size_bytes: 100,
+            ..Default::default()
+        });
+        let req = Request::builder()
+            .uri("/_/catch_up_package")
+            .header(CONTENT_TYPE, CONTENT_TYPE_CBOR)
+            .method(hyper::Method::POST)
+            .body(Body::new(Full::from(vec![0; 1000])))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn payload_too_large_with_content_length() {
+        let router = dummy_router(Config {
+            max_request_size_bytes: 100,
+            ..Default::default()
+        });
+        let req = Request::builder()
+            .uri("/_/catch_up_package")
+            .header(CONTENT_TYPE, CONTENT_TYPE_CBOR)
+            .method(hyper::Method::POST)
+            .header("content-length", "1000")
+            .body(Body::new(Full::from(vec![0; 1000])))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn invalid_method_for_existing_endpoint() {
+        let router = dummy_router(Config::default());
+        let req = Request::builder()
+            .uri("/_/catch_up_package")
+            .header(CONTENT_TYPE, CONTENT_TYPE_CBOR)
+            .method(hyper::Method::GET)
+            .body(Body::new(Empty::new()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn pre_flight_cors() {
+        let router = dummy_router(Config::default());
+        let req = Request::builder()
+            .uri("/_/catch_up_package")
+            .method(hyper::Method::OPTIONS)
+            .body(Body::new(Empty::new()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(resp.headers().contains_key(ACCESS_CONTROL_ALLOW_HEADERS));
+        assert!(resp.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(resp.headers().contains_key(ACCESS_CONTROL_ALLOW_METHODS));
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn pre_flight_cors_fallback_path() {
+        let router = dummy_router(Config::default());
+        let req = Request::builder()
+            .uri("/_/sdfsfdsfd")
+            .method(hyper::Method::OPTIONS)
+            .body(Body::new(Empty::new()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(resp.headers().contains_key(ACCESS_CONTROL_ALLOW_HEADERS));
+        assert!(resp.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(resp.headers().contains_key(ACCESS_CONTROL_ALLOW_METHODS));
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn origin_cors() {
+        let router = dummy_router(Config::default());
+        let req = Request::builder()
+            .uri(format!("/api/v2/canister/{}/query", CanisterId::ic_00()))
+            .header(CONTENT_TYPE, CONTENT_TYPE_CBOR)
+            .method(hyper::Method::POST)
+            .body(Body::new(Empty::new()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(resp.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn non_existing_endpoint() {
+        let router = dummy_router(Config::default());
+        let req = Request::builder()
+            .uri("/_/idontexist")
+            .method(hyper::Method::GET)
+            .body(Body::new(Empty::new()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn enforce_cbor_header() {
+        let router = dummy_router(Config::default());
+        let req = Request::builder()
+            .uri("/_/catch_up_package")
+            .method(hyper::Method::POST)
+            .body(Body::new(Empty::new()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn request_timeout() {
+        let router = dummy_router(Config {
+            request_timeout_seconds: 1,
+            ..Default::default()
+        });
+        let req = infinite_request(
+            "/_/catch_up_package".to_string(),
+            Method::POST,
+            Some((CONTENT_TYPE, CONTENT_TYPE_CBOR)),
+        );
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn concurrent_request_limiter_cup() {
+        let router = dummy_router(Config {
+            max_catch_up_package_concurrent_requests: 10,
+            ..Default::default()
+        });
+        let futs = (0..11)
+            .map(|_| {
+                let req = infinite_request(
+                    "/_/catch_up_package".to_string(),
+                    Method::POST,
+                    Some((CONTENT_TYPE, CONTENT_TYPE_CBOR)),
+                );
+                let router = router.clone();
+                async { router.oneshot(req).await.unwrap() }.boxed()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            select_all(futs).await.0.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_request_limiter_query() {
+        let router = dummy_router(Config {
+            max_query_concurrent_requests: 10,
+            ..Default::default()
+        });
+        let futs = (0..11)
+            .map(|_| {
+                let req = infinite_request(
+                    format!("/api/v2/canister/{}/query", CanisterId::ic_00()),
+                    Method::POST,
+                    Some((CONTENT_TYPE, CONTENT_TYPE_CBOR)),
+                );
+                let router = router.clone();
+                async { router.oneshot(req).await.unwrap() }.boxed()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            select_all(futs).await.0.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_request_limiter_not_all_blocked() {
+        let router = dummy_router(Config {
+            max_query_concurrent_requests: 10,
+            ..Default::default()
+        });
+        let futs = (0..11)
+            .map(|_| {
+                let req = infinite_request(
+                    format!("/api/v2/canister/{}/query", CanisterId::ic_00()),
+                    Method::POST,
+                    Some((CONTENT_TYPE, CONTENT_TYPE_CBOR)),
+                );
+                let router = router.clone();
+                async { router.oneshot(req).await.unwrap() }.boxed()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            select_all(futs).await.0.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        let req = Request::builder()
+            .uri("/_/catch_up_package")
+            .header(CONTENT_TYPE, CONTENT_TYPE_CBOR)
+            .method(hyper::Method::POST)
+            .body(Body::new(Empty::new()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -3,6 +3,7 @@ use super::{
     metadata_state::{IngressHistoryState, Stream, Streams, SystemMetadata},
 };
 use crate::{
+    canister_snapshots::CanisterSnapshots,
     canister_state::queues::CanisterQueuesLoopDetector,
     canister_state::system_state::{push_input, CanisterOutputQueuesIterator},
     metadata_state::{subnet_call_context_manager::SignWithEcdsaContext, StreamMap},
@@ -15,7 +16,7 @@ use ic_interfaces::execution_environment::CanisterOutOfCyclesError;
 use ic_registry_routing_table::RoutingTable;
 use ic_registry_subnet_type::SubnetType;
 use ic_types::{
-    batch::RawQueryStats,
+    batch::{ConsensusResponse, RawQueryStats},
     ingress::IngressStatus,
     messages::{CallbackId, CanisterMessage, Ingress, MessageId, RequestOrResponse, Response},
     xnet::QueueId,
@@ -131,8 +132,8 @@ impl<'a> OutputIterator<'a> {
     ) -> Self {
         let mut canister_iterators: VecDeque<_> = canisters
             .iter_mut()
+            .filter(|(_, canister)| canister.has_output())
             .map(|(owner, canister)| canister.system_state.output_into_iter(*owner))
-            .filter(|handle| !handle.is_empty())
             .collect();
 
         let mut rng = ChaChaRng::seed_from_u64(seed);
@@ -382,8 +383,6 @@ impl MemoryTaken {
 //
 // * We don't derive `Serialize` and `Deserialize` because these are handled by
 // our OP layer.
-// * We don't derive `Hash` because `ingress_history` is a Hashmap that doesn't
-// derive `Hash`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplicatedState {
     /// States of all canisters, indexed by canister ids.
@@ -401,11 +400,14 @@ pub struct ReplicatedState {
     /// Responses from consensus are to be processed each round.
     /// The queue is, therefore, emptied at the end of every round.
     // TODO(EXE-109): Move this queue into `subnet_queues`
-    pub consensus_queue: Vec<Response>,
+    pub consensus_queue: Vec<ConsensusResponse>,
 
     /// Temporary query stats received during the current epoch.
     /// Reset during the start of each epoch.
     pub epoch_query_stats: RawQueryStats,
+
+    /// Manages the canister snapshots.
+    pub canister_snapshots: CanisterSnapshots,
 }
 
 impl ReplicatedState {
@@ -417,6 +419,7 @@ impl ReplicatedState {
             subnet_queues: CanisterQueues::default(),
             consensus_queue: Vec::new(),
             epoch_query_stats: RawQueryStats::default(),
+            canister_snapshots: CanisterSnapshots::default(),
         }
     }
 
@@ -426,6 +429,7 @@ impl ReplicatedState {
         metadata: SystemMetadata,
         subnet_queues: CanisterQueues,
         epoch_query_stats: RawQueryStats,
+        canister_snapshots: CanisterSnapshots,
     ) -> Self {
         let mut res = Self {
             canister_states,
@@ -433,6 +437,7 @@ impl ReplicatedState {
             subnet_queues,
             consensus_queue: Vec::new(),
             epoch_query_stats,
+            canister_snapshots,
         };
         res.update_stream_responses_size_bytes();
         res
@@ -788,9 +793,7 @@ impl ReplicatedState {
             &mut self.subnet_queues,
             own_subnet_id,
             // We seed the output iterator with the time. We can do this because
-            // we don't need unpredictability of the rotation, and we accept that
-            // in case the same time is passed in two consecutive batches we
-            // rotate by the same amount for now.
+            // we don't need unpredictability of the rotation.
             time.as_nanos_since_unix_epoch(),
         )
     }
@@ -923,6 +926,7 @@ impl ReplicatedState {
             mut subnet_queues,
             consensus_queue,
             epoch_query_stats: _,
+            canister_snapshots,
         } = self;
 
         // Consensus queue is always empty at the end of the round.
@@ -958,6 +962,7 @@ impl ReplicatedState {
             subnet_queues,
             consensus_queue,
             epoch_query_stats: RawQueryStats::default(), // Don't preserve query stats during subnet splitting.
+            canister_snapshots,
         })
     }
 
@@ -980,6 +985,7 @@ impl ReplicatedState {
             ref mut subnet_queues,
             consensus_queue: _,
             epoch_query_stats: _,
+            canister_snapshots: _,
         } = self;
 
         // Reset query stats after subnet split
@@ -1140,6 +1146,8 @@ pub mod testing {
             subnet_queues: Default::default(),
             consensus_queue: Default::default(),
             epoch_query_stats: Default::default(),
+            // TODO(EXC-1527): Handle canister snapshots during a subnet split.
+            canister_snapshots: CanisterSnapshots::default(),
         };
     }
 }

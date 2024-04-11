@@ -13,7 +13,7 @@ crc32fast = "1.2.0"
 dfn_candid = { path = "../../rust_canisters/dfn_candid" }
 dfn_core = { path = "../../rust_canisters/dfn_core" }
 dfn_protobuf = { path = "../../rust_canisters/dfn_protobuf" }
-hex = { version = "0.4.2", features = ["serde"] }
+hex = { workspace = true }
 ic-base-types = { path = "../../types/base_types" }
 ic-crypto-sha2 = { path = "../../crypto/sha2/" }
 ic-ledger-canister-core = { path = "../ledger_canister_core" }
@@ -21,7 +21,7 @@ ic-ledger-core = { path = "../ledger_core" }
 icrc-ledger-types = { path = "../../../packages/icrc-ledger-types" }
 ic-ledger-hash-of = { path = "../../../packages/ic-ledger-hash-of" }
 lazy_static = "1.4.0"
-num-traits = "0.2.12"
+num-traits = { workspace = true }
 on_wire = { path = "../../rust_canisters/on_wire" }
 prost = { workspace = true }
 prost-derive = "0.12"

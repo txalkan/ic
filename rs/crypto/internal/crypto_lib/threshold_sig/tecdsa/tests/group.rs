@@ -1,6 +1,6 @@
 use ic_crypto_internal_threshold_sig_ecdsa::*;
 use ic_crypto_test_utils_reproducible_rng::reproducible_rng;
-use rand::Rng;
+use rand::{Rng, RngCore};
 
 #[test]
 fn not_affected_by_point_serialization_bug() -> ThresholdEcdsaResult<()> {
@@ -46,8 +46,11 @@ fn verify_serialization_round_trips_correctly() -> ThresholdEcdsaResult<()> {
     for curve_type in EccCurveType::all() {
         let identity = EccPoint::identity(curve_type);
 
-        // Identity should consist entirely of zero bytes
-        assert!(identity.serialize().iter().all(|x| *x == 0x00));
+        if curve_type != EccCurveType::Ed25519 {
+            // Identity should consist entirely of zero bytes
+            // except for Edwards which does its own thing
+            assert!(identity.serialize().iter().all(|x| *x == 0x00));
+        }
 
         assert_serialization_round_trips(identity);
         assert_serialization_round_trips(EccPoint::generator_g(curve_type));
@@ -117,7 +120,14 @@ fn generator_h_has_expected_value() -> ThresholdEcdsaResult<()> {
         let h = EccPoint::generator_h(curve_type);
 
         let input = "h";
-        let dst = format!("ic-crypto-tecdsa-{}-generator-h", curve_type);
+
+        let proto_name = if curve_type == EccCurveType::K256 || curve_type == EccCurveType::P256 {
+            "tecdsa"
+        } else {
+            "idkg"
+        };
+
+        let dst = format!("ic-crypto-{}-{}-generator-h", proto_name, curve_type);
 
         let h2p = EccPoint::hash_to_point(curve_type, input.as_bytes(), dst.as_bytes())?;
 
@@ -154,6 +164,95 @@ fn p256_wide_reduce_scalar_expected_value() -> ThresholdEcdsaResult<()> {
     );
 
     Ok(())
+}
+
+#[test]
+fn ed25519_wide_reduce_scalar_expected_value() -> ThresholdEcdsaResult<()> {
+    // Checked using Python
+    let wide_input = hex::decode("5465872a72824a73539f16e825035c403a2596407116900d47141fca8cbfd9a638af75a71310b08fe6351dd302b820c86b15e71ea73c78c876c1f88338a0").unwrap();
+
+    let scalar = EccScalar::from_bytes_wide(EccCurveType::Ed25519, &wide_input)?;
+
+    let mut bytes = scalar.serialize();
+    bytes.reverse(); // Ed25519 uses little endian serialization
+
+    assert_eq!(
+        hex::encode(bytes),
+        "0dbde3b1df91378aedecf61861150a7961b23ef8aa7650aaf27c44b73fbec2c2"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn scalar_deserializaion_errors_if_byte_length_invalid() {
+    let rng = &mut reproducible_rng();
+    for curve in EccCurveType::all() {
+        let max_bytes: usize = curve.scalar_bytes() * 100;
+        for num_bytes in 0..=max_bytes {
+            if num_bytes == curve.scalar_bytes() {
+                continue;
+            }
+            let mut bytes = vec![0u8; num_bytes];
+            rng.fill_bytes(&mut bytes[..]);
+            assert_eq!(
+                EccScalar::deserialize(curve, &bytes[..]),
+                Err(ThresholdEcdsaSerializationError(
+                    "Unexpected length".to_string()
+                ))
+            );
+        }
+    }
+}
+
+#[test]
+fn scalar_deserializaion_errors_is_over_the_order() {
+    for curve in EccCurveType::all() {
+        let bytes = vec![0xFFu8; curve.scalar_bytes()];
+        assert_eq!(
+            EccScalar::deserialize(curve, &bytes[..]),
+            Err(ThresholdEcdsaSerializationError(
+                "Invalid point encoding".to_string()
+            ))
+        );
+    }
+}
+
+#[test]
+fn scalar_from_bytes_wide_errors_if_byte_length_invalid() {
+    let rng = &mut reproducible_rng();
+    for curve in EccCurveType::all() {
+        let valid_num_bytes = curve.scalar_bytes() * 2;
+        let min_bytes = valid_num_bytes + 1;
+        let max_bytes: usize = curve.scalar_bytes() * 100;
+        for num_bytes in min_bytes..=max_bytes {
+            let mut bytes = vec![0u8; num_bytes];
+            rng.fill_bytes(&mut bytes[..]);
+            assert_eq!(
+                EccScalar::from_bytes_wide(curve, &bytes[..]),
+                Err(ThresholdEcdsaError::InvalidScalar)
+            );
+        }
+    }
+}
+
+#[test]
+fn point_deserialization_errors_if_byte_length_invalid() {
+    let rng = &mut reproducible_rng();
+    for curve in EccCurveType::all() {
+        let max_bytes: usize = curve.point_bytes() * 100;
+        for num_bytes in 0..=max_bytes {
+            if num_bytes == curve.point_bytes() {
+                continue;
+            }
+            let mut bytes = vec![0u8; num_bytes];
+            rng.fill_bytes(&mut bytes[..]);
+            assert_eq!(
+                EccPoint::deserialize(curve, &bytes[..]),
+                Err(ThresholdEcdsaError::InvalidPoint)
+            );
+        }
+    }
 }
 
 #[test]
@@ -286,6 +385,10 @@ fn test_y_is_even() -> ThresholdEcdsaResult<()> {
     let rng = &mut reproducible_rng();
 
     for curve_type in EccCurveType::all() {
+        if curve_type == EccCurveType::Ed25519 {
+            continue;
+        }
+
         let g = EccPoint::generator_g(curve_type);
 
         for _trial in 0..100 {
@@ -296,14 +399,7 @@ fn test_y_is_even() -> ThresholdEcdsaResult<()> {
             match (p.is_y_even()?, np.is_y_even()?) {
                 (true, true) => panic!("Both point and its negation have even y"),
                 (false, false) => panic!("Neither point nor its negation have even y"),
-                (true, false) => {
-                    assert_eq!(p.affine_y()?.sign(), 0x00);
-                    assert_eq!(np.affine_y()?.sign(), 0x01);
-                }
-                (false, true) => {
-                    assert_eq!(p.affine_y()?.sign(), 0x01);
-                    assert_eq!(np.affine_y()?.sign(), 0x00)
-                }
+                (_, _) => {}
             }
         }
     }
@@ -447,30 +543,6 @@ fn test_mul_n_vartime_naf() -> ThresholdEcdsaResult<()> {
 
                 assert_eq!(computed_result, expected_result);
             }
-        }
-    }
-
-    Ok(())
-}
-
-#[test]
-fn test_mul2_table() -> ThresholdEcdsaResult<()> {
-    let rng = &mut reproducible_rng();
-
-    for curve in EccCurveType::all() {
-        let g = EccPoint::hash_to_point(curve, &rng.gen::<[u8; 32]>(), b"g")?;
-        let h = EccPoint::hash_to_point(curve, &rng.gen::<[u8; 32]>(), b"h")?;
-
-        let tbl = EccPointMul2Table::new(g.clone(), h.clone())?;
-
-        for _ in 0..100 {
-            let x = EccScalar::random(curve, rng);
-            let y = EccScalar::random(curve, rng);
-
-            let refv = EccPoint::mul_2_points(&g, &x, &h, &y)?;
-
-            let tblv = tbl.mul2(&x, &y)?;
-            assert_eq!(refv, tblv);
         }
     }
 

@@ -8,7 +8,7 @@ use ic_config::{
     flag_status::FlagStatus,
     subnet_config::{SchedulerConfig, SubnetConfig},
 };
-use ic_ic00_types::{
+use ic_management_canister_types::{
     CanisterIdRecord, CanisterSettingsArgsBuilder, EmptyBlob, InstallCodeArgs, Method, Payload,
     IC_00,
 };
@@ -92,13 +92,16 @@ fn wat2wasm(wat: &str) -> Vec<u8> {
 /// and sandboxing if it cannot find the sandboxing binaries, which happens in
 /// local builds with `cargo`.
 fn should_skip_test_due_to_disabled_dts() -> bool {
-    if !(std::env::var("SANDBOX_BINARY").is_ok() && std::env::var("LAUNCHER_BINARY").is_ok()) {
+    if !(std::env::var("SANDBOX_BINARY").is_ok()
+        && std::env::var("LAUNCHER_BINARY").is_ok()
+        && std::env::var("COMPILER_BINARY").is_ok())
+    {
         eprintln!(
             "Skipping the test because DTS is not supported without \
              canister sandboxing binaries.\n\
              To fix this:\n\
              - either run the test with `bazel test`\n\
-             - or define the SANDBOX_BINARY and LAUNCHER_BINARY environment variables \
+             - or define the SANDBOX_BINARY and LAUNCHER_BINARY and COMPILER_BINARY environment variables \
              with the paths to the corresponding binaries."
         );
         return true;
@@ -315,7 +318,6 @@ fn setup_dts_install_code(
             vec![],
             None,
             None,
-            None,
         )
         .encode(),
     );
@@ -330,15 +332,15 @@ fn setup_dts_install_code(
 
 // These numbers were obtained by running the test and printing the costs.
 // They need to be adjusted if we change fees or the Wasm source code.
-const INSTALL_CODE_INGRESS_COST: u128 = 1_966_000;
+const INSTALL_CODE_INGRESS_COST: u128 = 1_952_000;
 const NORMAL_INGRESS_COST: u128 = 1_224_000;
 const MAX_EXECUTION_COST: u128 = 990_000;
 const ACTUAL_EXECUTION_COST: u128 = match EmbeddersConfig::new()
     .feature_flags
     .wasm_native_stable_memory
 {
-    FlagStatus::Enabled => 988_890,
-    FlagStatus::Disabled => 868_892,
+    FlagStatus::Enabled => 984_090,
+    FlagStatus::Disabled => 864_092,
 };
 
 #[test]
@@ -538,7 +540,6 @@ fn dts_pending_upgrade_with_heartbeat() {
             vec![],
             None,
             None,
-            None,
         );
         let payload = wasm()
             .call_simple(
@@ -640,7 +641,6 @@ fn dts_scheduling_of_install_code() {
             *c,
             binary.clone(),
             vec![],
-            None,
             None,
             None,
         );
@@ -809,7 +809,6 @@ fn dts_pending_install_code_does_not_block_subnet_messages_of_other_canisters() 
             vec![],
             None,
             None,
-            None,
         );
         let payload = wasm()
             .call_simple(
@@ -935,7 +934,6 @@ fn dts_pending_execution_blocks_subnet_messages_to_the_same_canister() {
             vec![],
             None,
             None,
-            None,
         );
         env.send_ingress(user_id, IC_00, Method::InstallCode, args.encode())
     };
@@ -1007,7 +1005,6 @@ fn dts_pending_install_code_blocks_update_messages_to_the_same_canister() {
             canister,
             binary,
             vec![],
-            None,
             None,
             None,
         );
@@ -1107,7 +1104,6 @@ fn dts_long_running_install_and_update() {
             canister[i],
             UNIVERSAL_CANISTER_WASM.into(),
             vec![],
-            None,
             None,
             None,
         );
@@ -1310,7 +1306,6 @@ fn dts_unrelated_subnet_messages_make_progress() {
             vec![],
             None,
             None,
-            None,
         );
         env.send_ingress(user_id, IC_00, Method::InstallCode, args.encode())
     };
@@ -1358,7 +1353,7 @@ fn dts_ingress_status_of_update_is_correct() {
         .install_canister_with_cycles(binary, vec![], None, INITIAL_CYCLES_BALANCE)
         .unwrap();
 
-    let original_time = env.time();
+    let original_time = env.time_of_next_round();
     let update = env.send_ingress(user_id, canister, "update", vec![]);
 
     env.tick();
@@ -1428,7 +1423,7 @@ fn dts_ingress_status_of_install_is_correct() {
         .install_canister_with_cycles(binary.clone(), vec![], None, INITIAL_CYCLES_BALANCE)
         .unwrap();
 
-    let original_time = env.time();
+    let original_time = env.time_of_next_round();
 
     let install = {
         let args = InstallCodeArgs::new(
@@ -1436,7 +1431,6 @@ fn dts_ingress_status_of_install_is_correct() {
             canister,
             binary,
             vec![],
-            None,
             None,
             None,
         );
@@ -1510,7 +1504,7 @@ fn dts_ingress_status_of_upgrade_is_correct() {
         .install_canister_with_cycles(binary.clone(), vec![], None, INITIAL_CYCLES_BALANCE)
         .unwrap();
 
-    let original_time = env.time();
+    let original_time = env.time_of_next_round();
 
     let install = {
         let args = InstallCodeArgs::new(
@@ -1518,7 +1512,6 @@ fn dts_ingress_status_of_upgrade_is_correct() {
             canister,
             binary,
             vec![],
-            None,
             None,
             None,
         );
@@ -1611,7 +1604,7 @@ fn dts_ingress_status_of_update_with_call_is_correct() {
         .inter_update(b_id, call_args().other_side(b))
         .build();
 
-    let original_time = env.time();
+    let original_time = env.time_of_next_round();
     let update = env.send_ingress(user_id, a_id, "update", a);
 
     env.tick();
@@ -1704,7 +1697,6 @@ fn dts_canister_uninstalled_due_to_resource_charges_with_aborted_updrade() {
             canister,
             binary,
             vec![],
-            None,
             None,
             None,
         );

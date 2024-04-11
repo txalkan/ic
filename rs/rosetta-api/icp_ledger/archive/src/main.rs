@@ -65,10 +65,9 @@ fn append_blocks(mut blocks: Vec<EncodedBlock>) {
     for block in &blocks {
         archive_state.total_block_size += block.size_bytes();
     }
-    assert!(
-        archive_state.total_block_size < archive_state.max_memory_size_bytes,
-        "No space left"
-    );
+    if archive_state.total_block_size > archive_state.max_memory_size_bytes {
+        ic_cdk::trap("No space left");
+    }
     archive_state.blocks.append(&mut blocks);
     print(format!(
         "[archive node] append_blocks(): done. archive size: {} blocks",
@@ -187,7 +186,7 @@ fn get_blocks(GetBlocksArgs { start, length }: GetBlocksArgs) -> GetBlocksResult
     Ok(BlockRange {
         blocks: read_encoded_blocks(start, length)?
             .into_iter()
-            .map(|b| Block::decode(b).expect("failed to decode a block").into())
+            .map(|b| CandidBlock::from(Block::decode(b).expect("failed to decode a block")))
             .collect::<Vec<CandidBlock>>(),
     })
 }

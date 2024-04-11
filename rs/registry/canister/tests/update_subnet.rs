@@ -2,7 +2,7 @@ use assert_matches::assert_matches;
 use candid::Encode;
 use dfn_candid::candid;
 use ic_base_types::{subnet_id_try_from_protobuf, PrincipalId, SubnetId};
-use ic_ic00_types::{EcdsaCurve, EcdsaKeyId};
+use ic_management_canister_types::{EcdsaCurve, EcdsaKeyId};
 use ic_nns_common::registry::encode_or_panic;
 use ic_nns_test_utils::registry::TEST_ID;
 use ic_nns_test_utils::{
@@ -14,7 +14,7 @@ use ic_nns_test_utils::{
 };
 use ic_protobuf::registry::{
     crypto::v1::EcdsaSigningSubnetList,
-    subnet::v1::{GossipConfig, SubnetRecord},
+    subnet::v1::{EcdsaConfig as EcdsaConfigPb, GossipConfig, SubnetRecord},
 };
 use ic_registry_keys::{make_ecdsa_signing_subnet_list_key, make_subnet_record_key};
 use ic_registry_subnet_features::{EcdsaConfig, DEFAULT_ECDSA_MAX_QUEUE_SIZE};
@@ -36,6 +36,7 @@ use std::str::FromStr;
 mod common;
 use common::test_helpers::get_subnet_record;
 
+// TODO[NNS1-2986]: Remove, replacing with `make_ecdsa_master_public_key`.
 fn make_ecdsa_key(name: &str) -> EcdsaKeyId {
     EcdsaKeyId {
         curve: EcdsaCurve::Secp256k1,
@@ -166,6 +167,7 @@ fn test_a_canister_other_than_the_governance_canister_cannot_update_a_subnets_co
             ssh_readonly_access: vec![],
             ssh_backup_access: vec![],
             ecdsa_config: None,
+            chain_key_config: None,
         };
 
         // An attacker got a canister that is trying to pass for the governance
@@ -294,6 +296,7 @@ fn test_the_governance_canister_can_update_a_subnets_configuration() {
                             ssh_readonly_access: vec![],
                             ssh_backup_access: vec![],
                             ecdsa_config: None,
+                            chain_key_config: None,
                         }),
                     )],
                     preconditions: vec![],
@@ -398,6 +401,7 @@ fn test_the_governance_canister_can_update_a_subnets_configuration() {
                 ssh_readonly_access: vec!["pub_key_0".to_string()],
                 ssh_backup_access: vec!["pub_key_1".to_string()],
                 ecdsa_config: None,
+                chain_key_config: None,
             }
         );
 
@@ -452,6 +456,7 @@ fn test_subnets_configuration_ecdsa_fields_are_updated_correctly() {
             ssh_readonly_access: vec![],
             ssh_backup_access: vec![],
             ecdsa_config: None,
+            chain_key_config: None,
         };
 
         // Just create the registry canister and wait until the subnet_handler ID is
@@ -484,15 +489,17 @@ fn test_subnets_configuration_ecdsa_fields_are_updated_correctly() {
         let signature_request_timeout_ns = Some(12345);
         let idkg_key_rotation_period_ms = Some(12345);
 
+        let legacy_ecdsa_config = EcdsaConfig {
+            quadruples_to_create_in_advance: 10,
+            key_ids: vec![make_ecdsa_key("key_id_1")],
+            max_queue_size: Some(DEFAULT_ECDSA_MAX_QUEUE_SIZE),
+            signature_request_timeout_ns,
+            idkg_key_rotation_period_ms,
+        };
+
         // update payload message
         let mut payload = UpdateSubnetPayload {
-            ecdsa_config: Some(EcdsaConfig {
-                quadruples_to_create_in_advance: 10,
-                key_ids: vec![make_ecdsa_key("key_id_1")],
-                max_queue_size: Some(DEFAULT_ECDSA_MAX_QUEUE_SIZE),
-                signature_request_timeout_ns,
-                idkg_key_rotation_period_ms,
-            }),
+            ecdsa_config: Some(legacy_ecdsa_config.clone()),
             ecdsa_key_signing_enable: Some(vec![make_ecdsa_key("key_id_1")]),
             ..empty_update_subnet_payload(subnet_id)
         };
@@ -544,13 +551,7 @@ fn test_subnets_configuration_ecdsa_fields_are_updated_correctly() {
 
         // Trying again, this time in the correct order
         payload = UpdateSubnetPayload {
-            ecdsa_config: Some(EcdsaConfig {
-                quadruples_to_create_in_advance: 10,
-                key_ids: vec![make_ecdsa_key("key_id_1")],
-                max_queue_size: Some(DEFAULT_ECDSA_MAX_QUEUE_SIZE),
-                signature_request_timeout_ns,
-                idkg_key_rotation_period_ms,
-            }),
+            ecdsa_config: Some(legacy_ecdsa_config.clone()),
             ecdsa_key_signing_enable: None,
             ..empty_update_subnet_payload(subnet_id)
         };
@@ -571,32 +572,18 @@ fn test_subnets_configuration_ecdsa_fields_are_updated_correctly() {
         .await;
 
         // Should see the new value for the config reflected
+        let legacy_ecdsa_config_pb = EcdsaConfigPb::from(legacy_ecdsa_config.clone());
         assert_eq!(
             new_subnet_record,
             SubnetRecord {
-                ecdsa_config: Some(
-                    EcdsaConfig {
-                        quadruples_to_create_in_advance: 10,
-                        key_ids: vec![make_ecdsa_key("key_id_1")],
-                        max_queue_size: Some(DEFAULT_ECDSA_MAX_QUEUE_SIZE),
-                        signature_request_timeout_ns,
-                        idkg_key_rotation_period_ms,
-                    }
-                    .into()
-                ),
+                ecdsa_config: Some(legacy_ecdsa_config_pb),
                 ..subnet_record
             }
         );
 
         // This update should enable signing on our subnet for the given key.
         payload = UpdateSubnetPayload {
-            ecdsa_config: Some(EcdsaConfig {
-                quadruples_to_create_in_advance: 10,
-                key_ids: vec![make_ecdsa_key("key_id_1")],
-                max_queue_size: Some(DEFAULT_ECDSA_MAX_QUEUE_SIZE),
-                signature_request_timeout_ns,
-                idkg_key_rotation_period_ms,
-            }),
+            ecdsa_config: Some(legacy_ecdsa_config.clone()),
             ecdsa_key_signing_enable: Some(vec![make_ecdsa_key("key_id_1")]),
             ..empty_update_subnet_payload(subnet_id)
         };
@@ -611,8 +598,13 @@ fn test_subnets_configuration_ecdsa_fields_are_updated_correctly() {
         .is_ok());
 
         let subnet_record = get_subnet_record(&registry, subnet_id).await;
-        let ecdsa_config = subnet_record.ecdsa_config.unwrap();
-        assert_eq!(ecdsa_config.max_queue_size, DEFAULT_ECDSA_MAX_QUEUE_SIZE);
+        {
+            let legacy_ecdsa_config = subnet_record.ecdsa_config.unwrap();
+            assert_eq!(
+                legacy_ecdsa_config.max_queue_size,
+                DEFAULT_ECDSA_MAX_QUEUE_SIZE
+            );
+        }
 
         let new_signing_subnet_list: Vec<_> = get_value_or_panic::<EcdsaSigningSubnetList>(
             &registry,

@@ -3,6 +3,8 @@ use crate::canister_api::GenericRequest;
 use crate::driver::group::{MAX_RUNTIME_BLOCKING_THREADS, MAX_RUNTIME_THREADS};
 use crate::driver::test_env_api::*;
 use crate::generic_workload_engine::{engine::Engine, metrics::LoadTestMetrics};
+use crate::retry_with_msg;
+use crate::retry_with_msg_async;
 use crate::types::*;
 use anyhow::bail;
 use candid::{Decode, Encode};
@@ -13,16 +15,13 @@ use futures::FutureExt;
 use ic_agent::export::Principal;
 use ic_agent::identity::BasicIdentity;
 use ic_agent::{
-    agent::{
-        http_transport::reqwest_transport::ReqwestHttpReplicaV2Transport, RejectCode,
-        RejectResponse,
-    },
+    agent::{http_transport::reqwest_transport::ReqwestTransport, RejectCode, RejectResponse},
     Agent, AgentError, Identity, RequestId,
 };
 use ic_canister_client::{Agent as DeprecatedAgent, Sender};
 use ic_config::ConfigOptional;
 use ic_constants::MAX_INGRESS_TTL;
-use ic_ic00_types::{CanisterStatusResult, EmptyBlob, Payload};
+use ic_management_canister_types::{CanisterStatusResult, EmptyBlob, Payload};
 use ic_message::ForwardParams;
 use ic_nervous_system_proto::pb::v1::GlobalTimeOfDay;
 use ic_nns_constants::{GOVERNANCE_CANISTER_ID, ROOT_CANISTER_ID};
@@ -130,12 +129,21 @@ impl<'a> UniversalCanister<'a> {
         effective_canister_id: PrincipalId,
         log: &slog::Logger,
     ) -> UniversalCanister<'a> {
-        retry_async(log, READY_WAIT_TIMEOUT, RETRY_BACKOFF, || async {
-            match Self::new_with_params(agent, effective_canister_id, None, None, None).await {
-                Ok(c) => Ok(c),
-                Err(e) => anyhow::bail!(e),
+        retry_with_msg_async!(
+            format!(
+                "install UniversalCanister {}",
+                effective_canister_id.to_string()
+            ),
+            log,
+            READY_WAIT_TIMEOUT,
+            RETRY_BACKOFF,
+            || async {
+                match Self::new_with_params(agent, effective_canister_id, None, None, None).await {
+                    Ok(c) => Ok(c),
+                    Err(e) => anyhow::bail!(e),
+                }
             }
-        })
+        )
         .await
         .expect("Could not create universal canister.")
     }
@@ -147,12 +155,21 @@ impl<'a> UniversalCanister<'a> {
         log: &slog::Logger,
     ) -> UniversalCanister<'a> {
         let c = cycles.into();
-        retry_async(log, READY_WAIT_TIMEOUT, RETRY_BACKOFF, || async {
-            match Self::new_with_cycles(agent, effective_canister_id, c).await {
-                Ok(c) => Ok(c),
-                Err(e) => anyhow::bail!(e),
+        retry_with_msg_async!(
+            format!(
+                "install UniversalCanister {}",
+                effective_canister_id.to_string()
+            ),
+            log,
+            READY_WAIT_TIMEOUT,
+            RETRY_BACKOFF,
+            || async {
+                match Self::new_with_cycles(agent, effective_canister_id, c).await {
+                    Ok(c) => Ok(c),
+                    Err(e) => anyhow::bail!(e),
+                }
             }
-        })
+        )
         .await
         .expect("Could not create universal canister with cycles.")
     }
@@ -165,20 +182,29 @@ impl<'a> UniversalCanister<'a> {
         pages: Option<u32>,
         log: &slog::Logger,
     ) -> UniversalCanister<'a> {
-        retry_async(log, READY_WAIT_TIMEOUT, RETRY_BACKOFF, || async {
-            match Self::new_with_params(
-                agent,
-                effective_canister_id,
-                compute_allocation,
-                cycles,
-                pages,
-            )
-            .await
-            {
-                Ok(c) => Ok(c),
-                Err(e) => anyhow::bail!(e),
+        retry_with_msg_async!(
+            format!(
+                "install UniversalCanister {}",
+                effective_canister_id.to_string()
+            ),
+            log,
+            READY_WAIT_TIMEOUT,
+            RETRY_BACKOFF,
+            || async {
+                match Self::new_with_params(
+                    agent,
+                    effective_canister_id,
+                    compute_allocation,
+                    cycles,
+                    pages,
+                )
+                .await
+                {
+                    Ok(c) => Ok(c),
+                    Err(e) => anyhow::bail!(e),
+                }
             }
-        })
+        )
         .await
         .expect("Could not create universal canister with params.")
     }
@@ -530,12 +556,21 @@ impl<'a> MessageCanister<'a> {
         timeout: Duration,
         backoff: Duration,
     ) -> MessageCanister<'a> {
-        retry_async(log, timeout, backoff, || async {
-            match Self::new_with_params(agent, effective_canister_id, None, None).await {
-                Ok(c) => Ok(c),
-                Err(e) => anyhow::bail!(e),
+        retry_with_msg_async!(
+            format!(
+                "install UniversalCanister {}",
+                effective_canister_id.to_string()
+            ),
+            log,
+            timeout,
+            backoff,
+            || async {
+                match Self::new_with_params(agent, effective_canister_id, None, None).await {
+                    Ok(c) => Ok(c),
+                    Err(e) => anyhow::bail!(e),
+                }
             }
-        })
+        )
         .await
         .expect("Could not create message canister.")
     }
@@ -752,9 +787,7 @@ pub async fn agent_with_client_identity(
     identity: impl Identity + 'static,
 ) -> Result<Agent, AgentError> {
     let a = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create_with_client(
-            url, client,
-        )?)
+        .with_transport(ReqwestTransport::create_with_client(url, client)?)
         .with_identity(identity)
         // Ingresses are created with the system time but are checked against the consensus time.
         // Consensus time is the time that is in the last finalized block. Consensus time might lag
@@ -827,7 +860,16 @@ pub(crate) fn assert_reject<T: std::fmt::Debug>(res: Result<T, AgentError>, code
     match res {
         Ok(val) => panic!("Expected call to fail but it succeeded with {:?}", val),
         Err(agent_error) => match agent_error {
-            AgentError::ReplicaError(RejectResponse {
+            AgentError::UncertifiedReject(RejectResponse {
+                reject_code,
+                reject_message,
+                ..
+            }) => assert_eq!(
+                code, reject_code,
+                "Expect code {:?} did not match {:?}. Reject message: {}",
+                code, reject_code, reject_message
+            ),
+            AgentError::CertifiedReject(RejectResponse {
                 reject_code,
                 reject_message,
                 ..
@@ -852,7 +894,23 @@ pub(crate) fn assert_reject_msg<T: std::fmt::Debug>(
     match res {
         Ok(val) => panic!("Expected call to fail but it succeeded with {:?}", val),
         Err(agent_error) => match agent_error {
-            AgentError::ReplicaError(RejectResponse {
+            AgentError::CertifiedReject(RejectResponse {
+                reject_code,
+                reject_message,
+                ..
+            }) => {
+                assert_eq!(
+                    code, reject_code,
+                    "Expect code {:?} did not match {:?}. Reject message: {}",
+                    code, reject_code, reject_message
+                );
+                assert!(
+                    reject_message.contains(partial_message),
+                    "Actual reject message: {}",
+                    reject_message
+                );
+            }
+            AgentError::UncertifiedReject(RejectResponse {
                 reject_code,
                 reject_message,
                 ..
@@ -901,20 +959,26 @@ pub(crate) fn assert_nodes_health_statuses(
         }
     };
 
-    retry(log, READY_WAIT_TIMEOUT, RETRY_BACKOFF, || {
-        let nodes: Vec<&IcNodeSnapshot> = nodes_with_undesired_status();
-        if nodes.is_empty() {
-            Ok(())
-        } else {
-            let nodes_str = nodes.iter().map(|e|format!("[node_id={}, ip={}]", e.node_id, e.get_ip_addr())).join(",\n");
-            let msg = format!("The following nodes have not reached the desired health statuses {status:?}:\n{nodes_str}");
-            bail!(msg);
+    retry_with_msg!(
+        format!("check for desired health status {:?}", status),
+        log,
+        READY_WAIT_TIMEOUT,
+        RETRY_BACKOFF,
+        || {
+            let nodes: Vec<&IcNodeSnapshot> = nodes_with_undesired_status();
+            if nodes.is_empty() {
+                Ok(())
+            } else {
+                let nodes_str = nodes.iter().map(|e|format!("[node_id={}, ip={}]", e.node_id, e.get_ip_addr())).join(",\n");
+                let msg = format!("The following nodes have not reached the desired health statuses {status:?}:\n{nodes_str}");
+                bail!(msg);
+            }
         }
-    }).unwrap_or_else(|err| panic!("Retry function failed within the timeout of {} sec, {err}", READY_WAIT_TIMEOUT.as_secs()));
+    ).unwrap_or_else(|err| panic!("Retry function failed within the timeout of {} sec, {err}", READY_WAIT_TIMEOUT.as_secs()));
 }
 
 /// Asserts that the response from an agent call is rejected by the replica
-/// resulting in a [`AgentError::ReplicaError`], and an expected [`RejectCode`].
+/// resulting in a [`AgentError::UncertifiedReject`], and an expected [`RejectCode`].
 pub(crate) fn assert_http_submit_fails(
     result: Result<RequestId, AgentError>,
     expected_reject_code: RejectCode,
@@ -922,20 +986,20 @@ pub(crate) fn assert_http_submit_fails(
     match result {
         Ok(val) => panic!("Expected call to fail but it succeeded with {:?}.", val),
         Err(agent_error) => match agent_error {
-            AgentError::ReplicaError(RejectResponse{reject_code, ..}) => assert_eq!(
+            AgentError::UncertifiedReject(RejectResponse{reject_code, ..}) => assert_eq!(
                 expected_reject_code, reject_code,
                 "Unexpected reject_code: `{:?}`.",
                 reject_code
             ),
             others => panic!(
-                "Expected agent call to replica to fail with AgentError::ReplicaError, but got {:?} instead.",
+                "Expected agent call to replica to fail with AgentError::UncertifiedReject, but got {:?} instead.",
                 others
             ),
         },
     }
 }
 
-pub(crate) async fn create_and_install(
+pub async fn create_and_install(
     agent: &Agent,
     effective_canister_id: PrincipalId,
     canister_wasm: &[u8],

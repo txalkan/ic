@@ -25,6 +25,19 @@ message EcdsaPayload {
   registry.crypto.v1.EcdsaKeyId key_id = 12;
 }
 
+message ConsensusResponse {
+  types.v1.CanisterId originator = 1;
+  types.v1.CanisterId respondent = 2;
+  uint64 callback = 3;
+  state.queues.v1.Funds refund = 4;
+  oneof payload {
+    bytes data = 5;
+    state.queues.v1.RejectContext reject = 6;
+  }
+  state.queues.v1.Cycles cycles_refund = 7;
+  optional uint32 deadline_seconds = 8;
+}
+
 message EcdsaKeyTranscript {
   registry.crypto.v1.EcdsaKeyId key_id = 1;
   UnmaskedTranscriptWithAttributes current = 2;
@@ -39,12 +52,14 @@ message OngoingSignature {
 message AvailableQuadruple {
   uint64 quadruple_id = 1;
   PreSignatureQuadrupleRef quadruple = 2;
+  // Deprecated. Use `quadruple.key_id` instead.
   registry.crypto.v1.EcdsaKeyId key_id = 3;
 }
 
 message QuadrupleInProgress {
   uint64 quadruple_id = 1;
   QuadrupleInCreation quadruple = 2;
+  // Deprecated. Use `quadruple.key_id` instead.
   registry.crypto.v1.EcdsaKeyId key_id = 3;
 }
 
@@ -57,7 +72,7 @@ message XnetReshareAgreement {
   reserved 2, 3;
   reserved "response";
   EcdsaReshareRequest request = 1;
-  state.queues.v1.Response initial_dealings = 4;
+  ConsensusResponse initial_dealings = 4;
 }
 
 message RequestId {
@@ -110,6 +125,10 @@ message RandomTranscriptParams {
   IDkgTranscriptParamsRef transcript_ref = 1;
 }
 
+message RandomUnmaskedTranscriptParams {
+  IDkgTranscriptParamsRef transcript_ref = 1;
+}
+
 message ReshareOfMaskedParams {
   IDkgTranscriptParamsRef transcript_ref = 1;
 }
@@ -123,12 +142,13 @@ message UnmaskedTimesMaskedParams {
 }
 
 message QuadrupleInCreation {
-  RandomTranscriptParams kappa_config = 1;
+  RandomTranscriptParams kappa_masked_config = 1;
   MaskedTranscript kappa_masked = 2;
 
   RandomTranscriptParams lambda_config = 3;
   MaskedTranscript lambda_masked = 4;
 
+  RandomUnmaskedTranscriptParams kappa_unmasked_config = 11;
   ReshareOfMaskedParams unmask_kappa_config = 5;
   UnmaskedTranscript kappa_unmasked = 6;
 
@@ -137,6 +157,8 @@ message QuadrupleInCreation {
 
   UnmaskedTimesMaskedParams kappa_times_lambda_config = 9;
   MaskedTranscript kappa_times_lambda = 10;
+
+  registry.crypto.v1.EcdsaKeyId key_id = 12;
 }
 
 message PreSignatureQuadrupleRef {
@@ -145,6 +167,7 @@ message PreSignatureQuadrupleRef {
   MaskedTranscript kappa_times_lambda_ref = 3;
   MaskedTranscript key_times_lambda_ref = 4;
   UnmaskedTranscript key_unmasked_ref = 5;
+  registry.crypto.v1.EcdsaKeyId key_id = 6;
 }
 
 message ThresholdEcdsaSigInputsRef {
@@ -158,7 +181,7 @@ message ThresholdEcdsaSigInputsRef {
 message CompletedSignature {
   reserved 1;
   reserved 2;
-  state.queues.v1.Response unreported = 3;
+  ConsensusResponse unreported = 3;
   bytes pseudo_random_id = 4;
 }
 
@@ -167,6 +190,7 @@ message EcdsaReshareRequest {
   repeated types.v1.NodeId receiving_node_ids = 2;
   uint64 registry_version = 3;
   registry.crypto.v1.EcdsaKeyId key_id = 4;
+  registry.crypto.v1.MasterPublicKeyId master_key_id = 5;
 }
 
 enum KeyTranscriptCreationState {

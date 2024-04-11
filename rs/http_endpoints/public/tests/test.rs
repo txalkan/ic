@@ -7,11 +7,17 @@ use crate::common::{
     create_conn_and_send_request, default_get_latest_state, default_latest_certified_height,
     get_free_localhost_socket_addr, wait_for_status_healthy, HttpEndpointBuilder,
 };
-use hyper::{body::to_bytes, Body, Client, Method, Request, StatusCode};
+use axum::body::{to_bytes, Body};
+use bytes::Bytes;
+use futures_util::{future::BoxFuture, FutureExt, StreamExt};
+use http_body::Frame;
+use http_body_util::StreamBody;
+use hyper::{body::Incoming, Method, Request, StatusCode};
+use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use ic_agent::{
     agent::{
-        http_transport::reqwest_transport::ReqwestHttpReplicaV2Transport, QueryBuilder,
-        RejectResponse, UpdateBuilder,
+        http_transport::reqwest_transport::ReqwestTransport, QueryBuilder, RejectResponse,
+        UpdateBuilder,
     },
     agent_error::HttpErrorPayload,
     export::Principal,
@@ -40,26 +46,19 @@ use ic_protobuf::registry::crypto::v1::{
 };
 use ic_registry_keys::make_crypto_threshold_signing_pubkey_key;
 use ic_replicated_state::ReplicatedState;
-use ic_test_utilities::{
-    state::ReplicatedStateBuilder,
-    types::ids::{canister_test_id, subnet_test_id, user_test_id},
-};
-use ic_test_utilities_time::mock_time;
+use ic_test_utilities_state::ReplicatedStateBuilder;
+use ic_test_utilities_types::ids::{canister_test_id, subnet_test_id, user_test_id};
 use ic_types::{
-    batch::{BatchPayload, ValidationContext},
-    consensus::{
-        certification::{Certification, CertificationContent},
-        BlockPayload, DataPayload,
-        {dkg::Dealings, Block, Payload, Rank},
-    },
+    consensus::certification::{Certification, CertificationContent},
     crypto::{
         threshold_sig::{
             ni_dkg::{NiDkgId, NiDkgTag, NiDkgTargetSubnet},
             ThresholdSigPublicKey,
         },
-        CombinedThresholdSig, CombinedThresholdSigOf, CryptoHash, CryptoHashOf, Signed,
+        CombinedThresholdSig, CombinedThresholdSigOf, CryptoHash, Signed,
     },
-    messages::{Blob, CertificateDelegation, HttpQueryResponse, HttpQueryResponseReply},
+    ingress::WasmResult,
+    messages::{Blob, CertificateDelegation},
     signature::ThresholdSignature,
     time::current_time,
     CryptoHashOfPartialState, Height, PrincipalId, RegistryVersion,
@@ -67,6 +66,7 @@ use ic_types::{
 use prost::Message;
 use serde_bytes::ByteBuf;
 use std::{
+    convert::Infallible,
     net::TcpStream,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -77,7 +77,6 @@ use tokio::{
     runtime::Runtime,
     time::{sleep, Duration},
 };
-use tower::ServiceExt;
 
 #[test]
 fn test_healthy_behind() {
@@ -87,42 +86,14 @@ fn test_healthy_behind() {
         listen_addr: addr,
         ..Default::default()
     };
-    let certified_state_height = Height::from(1);
-    let consensus_height = Height::from(certified_state_height.get() + 25);
 
     // We use this atomic to make sure that the health transition is from healthy -> certified_state_behind
     let healthy = Arc::new(AtomicBool::new(false));
     let healthy_c = healthy.clone();
     let mut mock_consensus_cache = MockConsensusPoolCache::new();
     mock_consensus_cache
-        .expect_finalized_block()
-        .returning(move || {
-            // The last certified height seen in a block is used to determine if
-            // replica is behind.
-            let certified_height = if !healthy_c.load(Ordering::SeqCst) {
-                certified_state_height
-            } else {
-                consensus_height
-            };
-            Block::new(
-                CryptoHashOf::from(CryptoHash(Vec::new())),
-                Payload::new(
-                    ic_types::crypto::crypto_hash,
-                    BlockPayload::Data(DataPayload {
-                        batch: BatchPayload::default(),
-                        dealings: Dealings::new_empty(Height::from(1)),
-                        ecdsa: None,
-                    }),
-                ),
-                Height::from(224),
-                Rank(456),
-                ValidationContext {
-                    registry_version: RegistryVersion::from(99),
-                    certified_height,
-                    time: mock_time(),
-                },
-            )
-        });
+        .expect_is_replica_behind()
+        .returning(move |_| healthy_c.load(Ordering::SeqCst));
 
     let mut mock_registry_client = MockRegistryClient::new();
     mock_registry_client
@@ -153,7 +124,7 @@ fn test_healthy_behind() {
         .run();
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .build()
         .unwrap();
 
@@ -185,7 +156,7 @@ fn test_unauthorized_controller() {
     HttpEndpointBuilder::new(rt.handle().clone(), config).run();
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .build()
         .unwrap();
 
@@ -200,7 +171,7 @@ fn test_unauthorized_controller() {
 
     let expected_error = AgentError::HttpError(HttpErrorPayload {
         status: 400,
-        content_type: Some("text/plain".to_string()),
+        content_type: Some("text/plain; charset=utf-8".to_string()),
         content: format!(
             "Effective principal id in URL {} does not match requested principal id: {}.",
             canister1, canister2
@@ -230,7 +201,7 @@ fn test_unauthorized_query() {
     let (_, _, mut query_handler) = HttpEndpointBuilder::new(rt.handle().clone(), config).run();
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .with_verify_query_signatures(false)
         .build()
         .unwrap();
@@ -243,11 +214,7 @@ fn test_unauthorized_query() {
         loop {
             let (_, resp) = query_handler.next_request().await.unwrap();
             resp.send_response(Ok((
-                HttpQueryResponse::Replied {
-                    reply: HttpQueryResponseReply {
-                        arg: Blob("success".into()),
-                    },
-                },
+                Ok(WasmResult::Reply("success".into())),
                 current_time(),
             )))
         }
@@ -273,7 +240,7 @@ fn test_unauthorized_query() {
         .unwrap();
     let expected_resp = AgentError::HttpError(HttpErrorPayload {
         status: 400,
-        content_type: Some("text/plain".to_string()),
+        content_type: Some("text/plain; charset=utf-8".to_string()),
         content: format!(
             "Specified CanisterId {} does not match effective canister id in URL {}",
             canister1, canister2
@@ -311,7 +278,7 @@ fn test_unauthorized_call() {
 
     let agent = Agent::builder()
         .with_identity(AnonymousIdentity)
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .build()
         .unwrap();
 
@@ -345,7 +312,7 @@ fn test_unauthorized_call() {
         .unwrap();
     let expected_resp = AgentError::HttpError(HttpErrorPayload {
         status: 400,
-        content_type: Some("text/plain".to_string()),
+        content_type: Some("text/plain; charset=utf-8".to_string()),
         content: format!(
             "Specified CanisterId {} does not match effective canister id in URL {}",
             canister1, canister2
@@ -423,7 +390,7 @@ fn test_request_timeout() {
     let (_, _, mut query_handler) = HttpEndpointBuilder::new(rt.handle().clone(), config).run();
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .with_verify_query_signatures(false)
         .build()
         .unwrap();
@@ -440,11 +407,7 @@ fn test_request_timeout() {
             let (_, resp) = query_handler.next_request().await.unwrap();
             sleep(Duration::from_secs(request_timeout_seconds + 1)).await;
             resp.send_response(Ok((
-                HttpQueryResponse::Replied {
-                    reply: HttpQueryResponseReply {
-                        arg: Blob("success".into()),
-                    },
-                },
+                Ok(WasmResult::Reply("success".into())),
                 current_time(),
             )))
         }
@@ -484,7 +447,7 @@ fn test_payload_too_large() {
 
     let request = |body: Vec<u8>| {
         rt.block_on(async {
-            let client = Client::new();
+            let client = Client::builder(TokioExecutor::new()).build_http();
 
             let req = Request::builder()
                 .method(Method::POST)
@@ -509,28 +472,29 @@ fn test_payload_too_large() {
     assert_eq!(StatusCode::PAYLOAD_TOO_LARGE, request(body.clone()));
 }
 
-/// Iff a http request body is slower to arrive than the configured limit, the endpoints responds with `408`.
+// /// Iff a http request body is slower to arrive than the configured limit, the endpoints responds with `408`.
 #[test]
 fn test_request_too_slow() {
     let rt = Runtime::new().unwrap();
     let addr = get_free_localhost_socket_addr();
     let config = Config {
         listen_addr: addr,
-        max_request_receive_seconds: 1,
+        request_timeout_seconds: 1,
         ..Default::default()
     };
-
     HttpEndpointBuilder::new(rt.handle().clone(), config).run();
+    let agent = Agent::builder()
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
+        .build()
+        .unwrap();
 
     rt.block_on(async {
-        let (mut sender, body) = Body::channel();
-
-        assert!(sender
-            .send_data(bytes::Bytes::from("hello world"))
-            .await
-            .is_ok());
-
-        let client = Client::new();
+        wait_for_status_healthy(&agent).await.unwrap();
+        let initial_fut: BoxFuture<'static, Result<Frame<Bytes>, Infallible>> =
+            async { Ok(Frame::data(Bytes::from("hello".as_bytes()))) }.boxed();
+        let body =
+            StreamBody::new(futures::stream::once(initial_fut).chain(futures::stream::pending()));
+        let client = Client::builder(TokioExecutor::new()).build_http();
 
         let req = Request::builder()
             .method(Method::POST)
@@ -543,7 +507,7 @@ fn test_request_too_slow() {
             .expect("request builder");
 
         let response = client.request(req).await.unwrap();
-        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     })
 }
 
@@ -559,7 +523,7 @@ fn test_status_code_when_ingress_filter_fails() {
     let (mut ingress_filter, _, _) = HttpEndpointBuilder::new(rt.handle().clone(), config).run();
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .build()
         .unwrap();
 
@@ -582,7 +546,7 @@ fn test_status_code_when_ingress_filter_fails() {
             .await
     });
 
-    let expected_response = Err(AgentError::ReplicaError(RejectResponse {
+    let expected_response = Err(AgentError::UncertifiedReject(RejectResponse {
         reject_code: ic_agent::agent::RejectCode::SysTransient,
         reject_message: "Test reject message".to_string(),
         error_code: Some("IC0204".to_string()),
@@ -606,7 +570,7 @@ fn test_graceful_shutdown_of_the_endpoint() {
     HttpEndpointBuilder::new(rt.handle().clone(), config).run();
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .build()
         .unwrap();
 
@@ -648,7 +612,7 @@ fn test_too_long_paths_are_rejected() {
     let canister = Principal::from_text("223xb-saaaa-aaaaf-arlqa-cai").unwrap();
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .build()
         .unwrap();
 
@@ -657,7 +621,7 @@ fn test_too_long_paths_are_rejected() {
 
     let expected_error_response = AgentError::HttpError(HttpErrorPayload {
         status: 404,
-        content_type: Some("text/plain".to_string()),
+        content_type: Some("text/plain; charset=utf-8".to_string()),
         content: b"Invalid path requested.".to_vec(),
     });
 
@@ -685,7 +649,7 @@ fn test_query_endpoint_returns_service_unavailable_on_missing_state() {
     let (_, _, mut query_handler) = HttpEndpointBuilder::new(rt.handle().clone(), config).run();
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .with_verify_query_signatures(false)
         .build()
         .unwrap();
@@ -737,7 +701,7 @@ fn can_retrieve_subnet_metrics() {
     };
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .build()
         .unwrap();
 
@@ -861,7 +825,7 @@ fn can_retrieve_subnet_metrics() {
     let request = |body: Vec<u8>| {
         rt.block_on(async {
             wait_for_status_healthy(&agent).await.unwrap();
-            let client = Client::new();
+            let client = Client::builder(TokioExecutor::new()).build_http();
 
             let req = Request::builder()
                 .method(Method::POST)
@@ -889,14 +853,14 @@ fn can_retrieve_subnet_metrics() {
     )
     .unwrap();
 
-    let mut response = request(body.as_ref().to_vec());
+    let response = request(body.as_ref().to_vec());
     assert_eq!(StatusCode::OK, response.status());
 
-    let bytes = |body: &mut Body| rt.block_on(async { to_bytes(body).await });
+    let bytes = |body: Incoming| rt.block_on(async { to_bytes(Body::new(body), usize::MAX).await });
     let subnet_metrics = parse_subnet_read_state_response(
         &subnet_id,
         Some(&root_pk),
-        serde_cbor::from_slice(&bytes(response.body_mut()).unwrap()).unwrap(),
+        serde_cbor::from_slice(&bytes(response.into_body()).unwrap()).unwrap(),
     )
     .unwrap();
     assert_eq!(expected_subnet_metrics, subnet_metrics);
@@ -913,7 +877,7 @@ fn subnet_metrics_not_supported_via_canister_read_state() {
     };
 
     let agent = Agent::builder()
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .build()
         .unwrap();
 
@@ -924,7 +888,7 @@ fn subnet_metrics_not_supported_via_canister_read_state() {
     let request = |body: Vec<u8>| {
         rt.block_on(async {
             wait_for_status_healthy(&agent).await.unwrap();
-            let client = Client::new();
+            let client = Client::builder(TokioExecutor::new()).build_http();
 
             let req = Request::builder()
                 .method(Method::POST)
@@ -954,4 +918,69 @@ fn subnet_metrics_not_supported_via_canister_read_state() {
 
     let response = request(body.as_ref().to_vec());
     assert_eq!(StatusCode::NOT_FOUND, response.status());
+}
+
+/// Assert that the endpoint accepts HTTP/2 requests.
+#[test]
+fn test_http_2_requests_are_accepted() {
+    let rt = Runtime::new().unwrap();
+    let addr = get_free_localhost_socket_addr();
+    let config = Config {
+        listen_addr: addr,
+        ..Default::default()
+    };
+
+    HttpEndpointBuilder::new(rt.handle().clone(), config).run();
+
+    let client = reqwest::ClientBuilder::new()
+        .http2_prior_knowledge()
+        .build()
+        .unwrap();
+
+    let response = rt.block_on(async move {
+        client
+            .get(format!("http://{}/api/v2/status", addr))
+            .header("Content-Type", "application/cbor")
+            .send()
+            .await
+            .unwrap()
+    });
+
+    assert!(
+        response.status().is_success(),
+        "Response was not successful: {:?}.",
+        response
+    );
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+}
+
+/// Assert that the endpoint accepts HTTP/1.1 requests.
+#[test]
+fn test_http_1_requests_are_accepted() {
+    let rt = Runtime::new().unwrap();
+    let addr = get_free_localhost_socket_addr();
+    let config = Config {
+        listen_addr: addr,
+        ..Default::default()
+    };
+
+    HttpEndpointBuilder::new(rt.handle().clone(), config).run();
+
+    let client = reqwest::ClientBuilder::new().http1_only().build().unwrap();
+
+    let response = rt.block_on(async move {
+        client
+            .get(format!("http://{}/api/v2/status", addr))
+            .header("Content-Type", "application/cbor")
+            .send()
+            .await
+            .unwrap()
+    });
+
+    assert!(
+        response.status().is_success(),
+        "Response was not successful: {:?}.",
+        response
+    );
+    assert_eq!(response.version(), reqwest::Version::HTTP_11);
 }

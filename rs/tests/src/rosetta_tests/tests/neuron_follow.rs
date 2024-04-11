@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PORT: u32 = 8108;
-const VM_NAME: &str = "rosetta-test-neuron-follow";
+const VM_NAME: &str = "rosetta-neuron-follow";
 
 pub fn test(env: TestEnv) {
     let _logger = env.logger();
@@ -67,7 +67,7 @@ async fn test_follow(ros: &RosettaApiClient, _ledger: &LedgerClient, neuron_info
 
     let acc = neuron_info.account_id;
     let neuron_index = neuron_info.neuron_subaccount_identifier;
-    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.into();
+    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.clone().into();
     let _expected_type = "FOLLOW".to_string();
     let res = do_multiple_txn_external(
         ros,
@@ -94,7 +94,7 @@ async fn test_follow(ros: &RosettaApiClient, _ledger: &LedgerClient, neuron_info
                 .first()
                 .expect("Expected one follow operation."),
             ic_rosetta_api::models::Operation {
-                _type: _expected_type,
+                type_: _expected_type,
                 ..
             }
         ));
@@ -125,7 +125,7 @@ async fn test_follow_with_hotkey(
     let acc = neuron_info.account_id;
     let neuron_index = neuron_info.neuron_subaccount_identifier;
     let neuron_controller = neuron_info.principal_id;
-    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.into();
+    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.clone().into();
 
     // Add hotkey.
     let (hotkey_acc, hotkey_keypair, hotkey_pk, _) = make_user_ed25519(5010);
@@ -185,7 +185,7 @@ async fn test_follow_with_hotkey(
                 .first()
                 .expect("Expected one follow operation."),
             ic_rosetta_api::models::Operation {
-                _type: _expected_type,
+                type_: _expected_type,
                 ..
             }
         ));
@@ -217,7 +217,7 @@ async fn test_follow_with_hotkey_raw(
     let acc = neuron_info.account_id;
     let neuron_index = neuron_info.neuron_subaccount_identifier;
     let neuron_controller = neuron_info.principal_id;
-    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.into();
+    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.clone().into();
 
     // Add hotkey.
     let (hotkey_acc, hotkey_keypair, hotkey_pk, _) = make_user_ed25519(5010);
@@ -469,7 +469,7 @@ async fn test_follow_too_many(
 ) {
     let acc = neuron_info.account_id;
     let neuron_index = neuron_info.neuron_subaccount_identifier;
-    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.into();
+    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.clone().into();
     let _expected_type = "FOLLOW".to_string();
     let mut followees = Vec::new();
     for i in 0..16 {

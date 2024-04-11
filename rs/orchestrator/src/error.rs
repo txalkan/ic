@@ -64,6 +64,9 @@ pub enum OrchestratorError {
 
     /// Network configuration error
     NetworkConfigurationError(String),
+
+    /// The given node is missing a domain name
+    DomainNameMissingError(NodeId),
 }
 
 impl OrchestratorError {
@@ -77,10 +80,6 @@ impl OrchestratorError {
 
     pub(crate) fn key_monitoring_error(msg: impl ToString) -> Self {
         OrchestratorError::ThresholdKeyMonitoringError(msg.to_string())
-    }
-
-    pub(crate) fn snp_error(msg: impl ToString) -> Self {
-        OrchestratorError::SnpError(msg.to_string())
     }
 }
 
@@ -145,6 +144,11 @@ impl fmt::Display for OrchestratorError {
             OrchestratorError::NetworkConfigurationError(msg) => {
                 write!(f, "Failed to apply network configuration: {}", msg)
             }
+            OrchestratorError::DomainNameMissingError(node_id) => write!(
+                f,
+                "Node {} does not have an associated domain name",
+                node_id
+            ),
         }
     }
 }

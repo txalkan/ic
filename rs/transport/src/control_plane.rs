@@ -31,6 +31,7 @@ use tower::Service;
 #[strum(serialize_all = "snake_case")]
 enum TransportTlsHandshakeError {
     DeadlineExceeded,
+    #[allow(dead_code)]
     Internal(String),
 }
 
@@ -41,8 +42,6 @@ const CONNECT_RETRY_SECONDS: u64 = 3;
 
 /// Time to wait for the TLS handshake (for both client/server sides)
 const TLS_HANDSHAKE_TIMEOUT_SECONDS: u64 = 30;
-/// Time to wait for the SEV handshake (for both client/server sides)
-const SEV_HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
 
 const CONNECT_TASK_NAME: &str = "connect";
 const ACCEPT_TASK_NAME: &str = "accept";
@@ -450,20 +449,6 @@ impl TransportImpl {
             Ok(Err(err)) => Err(TransportTlsHandshakeError::Internal(format!("{:?}", err))),
         }?;
         let AuthenticatedPeer::Node(peer_id) = authenticated_peer;
-        let tls_stream = match tokio::time::timeout(
-            Duration::from_secs(SEV_HANDSHAKE_TIMEOUT_SECONDS),
-            self.sev_handshake.perform_attestation_validation(
-                tls_stream,
-                peer_id,
-                latest_registry_version,
-            ),
-        )
-        .await
-        {
-            Err(_) => Err(TransportTlsHandshakeError::DeadlineExceeded),
-            Ok(Ok(tls_stream)) => Ok(tls_stream),
-            Ok(Err(err)) => Err(TransportTlsHandshakeError::Internal(format!("{:?}", err))),
-        }?;
         Ok((peer_id, tls_stream))
     }
 
@@ -478,20 +463,6 @@ impl TransportImpl {
             Duration::from_secs(TLS_HANDSHAKE_TIMEOUT_SECONDS),
             self.crypto
                 .perform_tls_client_handshake(stream, peer_id, latest_registry_version),
-        )
-        .await
-        {
-            Err(_) => Err(TransportTlsHandshakeError::DeadlineExceeded),
-            Ok(Ok(tls_stream)) => Ok(tls_stream),
-            Ok(Err(err)) => Err(TransportTlsHandshakeError::Internal(format!("{:?}", err))),
-        }?;
-        let tls_stream = match tokio::time::timeout(
-            Duration::from_secs(SEV_HANDSHAKE_TIMEOUT_SECONDS),
-            self.sev_handshake.perform_attestation_validation(
-                tls_stream,
-                peer_id,
-                latest_registry_version,
-            ),
         )
         .await
         {

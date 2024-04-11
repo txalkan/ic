@@ -1,5 +1,3 @@
-pub use ic_canister_client_sender::Ed25519KeyPair as EdKeypair;
-use ic_canister_client_sender::Secp256k1KeyPair;
 use ic_rosetta_api::convert::{
     from_hex, from_model_account_identifier, operations_to_requests, to_hex,
     to_model_account_identifier,
@@ -29,7 +27,9 @@ use log::debug;
 use rand::{seq::SliceRandom, thread_rng};
 use rosetta_api_serv::RosettaApiHandle;
 use rosetta_core::convert::principal_id_from_public_key;
+pub use rosetta_core::models::Ed25519KeyPair as EdKeypair;
 use rosetta_core::models::RosettaSupportedKeyPair;
+use rosetta_core::models::Secp256k1KeyPair;
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
@@ -90,7 +90,7 @@ where
         // first ask for the fee
         let mut fee_found = false;
         for o in Request::requests_to_operations(&[request.request.clone()], token_name).unwrap() {
-            if o._type.parse::<OperationType>().unwrap() == OperationType::Fee {
+            if o.type_.parse::<OperationType>().unwrap() == OperationType::Fee {
                 fee_found = true;
             } else {
                 dry_run_ops.push(o.clone());
@@ -179,7 +179,7 @@ where
 
     if accept_suggested_fee {
         for o in &mut all_ops {
-            if o._type.parse::<OperationType>().unwrap() == OperationType::Fee {
+            if o.type_.parse::<OperationType>().unwrap() == OperationType::Fee {
                 o.amount = Some(signed_amount(-(fee_icpts.get_e8s() as i128), token_name));
             }
         }
@@ -281,7 +281,7 @@ where
                 .get(
                     &from_model_account_identifier(p.account_identifier.as_ref().unwrap()).unwrap(),
                 )
-                .map(Arc::clone)
+                .cloned()
                 .unwrap_or_else(|| Arc::clone(&keypairs[0]));
             let bytes = from_hex(&p.hex_bytes).unwrap();
             let signature_bytes = keypair.sign(&bytes);
@@ -581,7 +581,7 @@ pub async fn send_icpts_with_window<T: RosettaSupportedKeyPair>(
 where
     Arc<T>: RosettaSupportedKeyPair,
 {
-    let public_key_der = ic_canister_client_sender::ed25519_public_key_to_der(keypair.get_pb_key());
+    let public_key_der = EdKeypair::der_encode_pk(keypair.get_pb_key()).unwrap();
 
     let from: AccountIdentifier = PrincipalId::new_self_authenticating(&public_key_der).into();
 
@@ -704,19 +704,15 @@ fn test_keypair_encoding() {
     let kp_secp256k1_key_pair = Secp256k1KeyPair::generate_from_u64(200);
 
     //Testing the functions of RosettaSupportedKeypair for EdKeyPair
-    assert_eq!(
-        kp_ed_keypair.public_key,
-        kp_ed_keypair.get_pb_key().as_slice()
-    );
     assert_eq!(kp_ed_keypair.get_curve_type(), CurveType::Edwards25519);
     let pid = kp_ed_keypair.generate_principal_id().unwrap();
     //RosettaSupportedKeyPairs supports two encoding types: HEX and DER.
     let pk_hex_encoded = kp_ed_keypair.hex_encode_pk();
     let pk_decoded = EdKeypair::hex_decode_pk(&pk_hex_encoded).unwrap();
-    assert_eq!(pk_decoded, kp_ed_keypair.public_key.to_vec());
+    assert_eq!(pk_decoded, kp_ed_keypair.get_pb_key());
     let pk_der_encoded = EdKeypair::der_encode_pk(kp_ed_keypair.get_pb_key()).unwrap();
     let pk_decoded = EdKeypair::der_decode_pk(pk_der_encoded).unwrap();
-    assert_eq!(pk_decoded, kp_ed_keypair.public_key.to_vec());
+    assert_eq!(pk_decoded, kp_ed_keypair.get_pb_key());
     //See if the principal id is recoverable from the hex encoded public key
     assert_eq!(EdKeypair::get_principal_id(&pk_hex_encoded).unwrap(), pid);
 
@@ -725,7 +721,7 @@ fn test_keypair_encoding() {
     assert_eq!(aid_b, pid.into());
     assert_eq!(pb_b, to_public_key(&kp_ed_keypair));
     assert_eq!(
-        kp_ed_keypair.public_key.to_vec(),
+        kp_ed_keypair.get_pb_key(),
         from_hex(&pb_b.hex_bytes).unwrap()
     );
     assert_eq!(pid_b, pid);

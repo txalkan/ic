@@ -2,9 +2,8 @@
 use candid::{CandidType, Decode, Deserialize, Encode, Principal};
 use ic_agent::identity::BasicIdentity;
 use ic_agent::Agent;
-use ic_agent::{agent::http_transport::reqwest_transport::ReqwestHttpReplicaV2Transport, Identity};
+use ic_agent::{agent::http_transport::reqwest_transport::ReqwestTransport, Identity};
 use ic_base_types::{CanisterId, PrincipalId};
-use ic_ic00_types::{CanisterInstallMode, CreateCanisterArgs, InstallCodeArgs};
 use ic_icrc1_ledger::FeatureFlags;
 use ic_icrc1_ledger::{InitArgs, InitArgsBuilder, LedgerArgument};
 use ic_icrc1_ledger_sm_tests::{
@@ -14,6 +13,7 @@ use ic_icrc1_ledger_sm_tests::{
 };
 use ic_icrc1_test_utils::minter_identity;
 use ic_ledger_canister_core::archive::ArchiveOptions;
+use ic_management_canister_types::{CanisterInstallMode, CreateCanisterArgs, InstallCodeArgs};
 use ic_starter_tests::{ReplicaBins, ReplicaContext, ReplicaStarterConfig};
 
 use std::sync::Arc;
@@ -74,9 +74,7 @@ pub async fn get_custom_agent(
     let replica_url = Url::parse(&format!("http://localhost:{}", context.port)).unwrap();
 
     // Setup the agent
-    let client = reqwest::ClientBuilder::new().build().unwrap();
-    let transport =
-        ReqwestHttpReplicaV2Transport::create_with_client(replica_url.clone(), client).unwrap();
+    let transport = ReqwestTransport::create(replica_url.clone()).unwrap();
     let agent = Agent::builder()
         .with_identity(basic_identity)
         .with_arc_transport(Arc::new(transport))
@@ -140,7 +138,6 @@ async fn install_canister(context: &ReplicaContext, init_arg: Vec<u8>, canister_
                 wasm_module: icrc_ledger_wasm(),
                 arg: init_arg,
                 mode: CanisterInstallMode::Install,
-                query_allocation: None,
                 sender_canister_version: None,
                 memory_allocation: None,
                 compute_allocation: None,

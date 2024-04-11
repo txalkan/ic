@@ -14,12 +14,14 @@ DEPENDENCIES = [
     "//rs/protobuf",
     "//rs/p2p/quic_transport",
     "//rs/types/base_types",
-    "@crate_index//:axum_0_7_0",
+    "@crate_index//:axum",
     "@crate_index//:bytes",
+    "@crate_index//:futures",
     "@crate_index//:prometheus",
     "@crate_index//:prost",
     "@crate_index//:rand",
     "@crate_index//:slog",
+    "@crate_index//:thiserror",
     "@crate_index//:tokio",
     "@crate_index//:tokio-metrics",
     "@crate_index//:tokio-util",
@@ -39,7 +41,6 @@ DEV_DEPENDENCIES = [
 
 MACRO_DEPENDENCIES = [
     "@crate_index//:async-trait",
-    "@crate_index//:strum_macros",
 ]
 
 ALIASES = {}

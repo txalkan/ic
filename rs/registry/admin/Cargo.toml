@@ -7,13 +7,13 @@ description.workspace = true
 documentation.workspace = true
 
 [dependencies]
-anyhow = "1.0.31"
+anyhow = { workspace = true }
 ic-prep = { path = "../../prep" }
-async-trait = "0.1.51"
+async-trait = { workspace = true }
 base64 = { workspace = true }
-clap = { workspace = true }
+clap = { version = "3.2.25", features = ["derive"] }
 futures = { workspace = true }
-hex = "0.4"
+hex = { workspace = true }
 cycles-minting-canister = { path = "../../nns/cmc" }
 ic-admin-derive = { path = "../admin-derive" }
 ic-btc-interface = { workspace = true }
@@ -24,7 +24,7 @@ ic-config = { path = "../../config" }
 ic-crypto-utils-threshold-sig-der = { path = "../../crypto/utils/threshold_sig_der" }
 ic-crypto-internal-types = { path = "../../crypto/internal/crypto_lib/types" }
 ic-http-utils = { path = "../../http_utils" }
-ic-ic00-types = { path = "../../types/ic00_types" }
+ic-management-canister-types = { path = "../../types/management_canister_types" }
 ic-interfaces-registry = { path = "../../interfaces/registry" }
 ic-protobuf = { path = "../../protobuf" }
 ic-registry-client = { path = "../client" }
@@ -68,7 +68,7 @@ chrono = { workspace = true }
 indexmap = { workspace = true }
 
 [dev-dependencies]
-assert_matches = "1.4.0"
+assert_matches = { workspace = true }
 
 [[bin]]
 name = "ic-admin"

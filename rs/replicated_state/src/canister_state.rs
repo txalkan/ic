@@ -8,7 +8,7 @@ use crate::canister_state::queues::CanisterOutputQueuesIterator;
 use crate::canister_state::system_state::{CanisterStatus, ExecutionTask, SystemState};
 use crate::{InputQueueType, StateError};
 pub use execution_state::{EmbedderCache, ExecutionState, ExportedFunctions, Global};
-use ic_ic00_types::{CanisterStatusType, LogVisibility};
+use ic_management_canister_types::{CanisterLog, CanisterStatusType, LogVisibility};
 use ic_registry_subnet_type::SubnetType;
 use ic_types::batch::TotalQueryStats;
 use ic_types::methods::SystemMethod;
@@ -172,6 +172,10 @@ impl CanisterState {
                     .as_nanos_since_unix_epoch(),
             ),
         )
+    }
+
+    pub fn new_local_snapshot_id(&mut self) -> u64 {
+        self.system_state.new_local_snapshot_id()
     }
 
     /// See `SystemState::push_input` for documentation.
@@ -425,6 +429,20 @@ impl CanisterState {
         self.system_state.wasm_chunk_store.memory_usage()
     }
 
+    /// Returns the memory usage of a snapshot created based on the current canister's state.
+    pub fn snapshot_memory_usage(&self) -> NumBytes {
+        let execution_usage = self
+            .execution_state
+            .as_ref()
+            .map_or(NumBytes::new(0), |execution_snapshot| {
+                execution_snapshot.memory_usage()
+            });
+
+        execution_usage
+            + self.wasm_chunk_store_memory_usage()
+            + NumBytes::from(self.system_state.certified_data.len() as u64)
+    }
+
     /// Sets the (transient) size in bytes of responses from this canister
     /// routed into streams and not yet garbage collected.
     pub(super) fn set_stream_responses_size_bytes(&mut self, size_bytes: usize) {
@@ -444,6 +462,11 @@ impl CanisterState {
             MemoryAllocation::Reserved(bytes) => bytes,
             MemoryAllocation::BestEffort => default_limit,
         }
+    }
+
+    /// Returns the Wasm memory limit from the canister settings.
+    pub fn wasm_memory_limit(&self) -> Option<NumBytes> {
+        self.system_state.wasm_memory_limit
     }
 
     /// Returns the current compute allocation for the canister.
@@ -548,6 +571,14 @@ impl CanisterState {
                 }
             }
         }
+    }
+
+    pub fn append_log(&mut self, other: &mut CanisterLog) {
+        self.system_state.canister_log.append(other);
+    }
+
+    pub fn clear_log(&mut self) {
+        self.system_state.canister_log.clear();
     }
 }
 

@@ -1,5 +1,4 @@
 use crate::setup::get_subnet_type;
-use crossbeam_channel::Sender;
 use ic_artifact_pool::{
     consensus_pool::ConsensusPoolImpl, ensure_persistent_pool_replica_version_compatibility,
 };
@@ -11,9 +10,13 @@ use ic_crypto::CryptoComponent;
 use ic_cycles_account_manager::CyclesAccountManager;
 use ic_execution_environment::ExecutionServices;
 use ic_https_outcalls_adapter_client::setup_canister_http_client;
-use ic_interfaces::{execution_environment::QueryHandler, p2p::artifact_manager::JoinGuard};
+use ic_interfaces::{
+    execution_environment::QueryExecutionService, p2p::artifact_manager::JoinGuard,
+    time_source::SysTimeSource,
+};
 use ic_interfaces_certified_stream_store::CertifiedStreamStore;
 use ic_interfaces_registry::{LocalStoreCertifiedTimeReader, RegistryClient};
+use ic_interfaces_state_manager::StateReader;
 use ic_logger::{info, ReplicaLogger};
 use ic_messaging::MessageRoutingImpl;
 use ic_metrics::MetricsRegistry;
@@ -24,6 +27,7 @@ use ic_registry_local_store::LocalStoreImpl;
 use ic_replica_setup_ic_network::setup_consensus_and_p2p;
 use ic_replicated_state::ReplicatedState;
 use ic_state_manager::{state_sync::StateSync, StateManagerImpl};
+use ic_tracing::ReloadHandles;
 use ic_types::{
     artifact::UnvalidatedArtifactMutation,
     artifact_kind::IngressArtifact,
@@ -33,6 +37,7 @@ use ic_types::{
 use ic_xnet_endpoint::{XNetEndpoint, XNetEndpointConfig};
 use ic_xnet_payload_builder::XNetPayloadBuilderImpl;
 use std::sync::{Arc, RwLock};
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Create the consensus pool directory (if none exists)
 fn create_consensus_pool_dir(config: &Config) {
@@ -59,14 +64,13 @@ pub fn construct_ic_stack(
     registry: Arc<dyn RegistryClient + Send + Sync>,
     crypto: Arc<CryptoComponent>,
     catch_up_package: Option<pb::CatchUpPackage>,
+    tracing_handle: ReloadHandles,
 ) -> std::io::Result<(
-    // TODO: remove this return value since it is used only in tests
-    Arc<StateManagerImpl>,
-    // TODO: remove this return value since it is used only in tests
-    Arc<dyn QueryHandler<State = ReplicatedState>>,
+    // TODO: remove next three return values since they are used only in tests
+    Arc<dyn StateReader<State = ReplicatedState>>,
+    QueryExecutionService,
+    UnboundedSender<UnvalidatedArtifactMutation<IngressArtifact>>,
     Vec<Box<dyn JoinGuard>>,
-    // TODO: remove this return value since it is used only in tests
-    Sender<UnvalidatedArtifactMutation<IngressArtifact>>,
     XNetEndpoint,
 )> {
     // Determine the correct catch-up package.
@@ -146,6 +150,8 @@ pub fn construct_ic_stack(
         artifact_pool_config.clone(),
         metrics_registry.clone(),
         log.clone(),
+        // TODO: use a builder pattern and remove the time source implementation from the constructor.
+        Arc::new(SysTimeSource::new()),
     )));
 
     // ---------- REPLICATED STATE DEPS FOLLOW ----------
@@ -284,7 +290,6 @@ pub fn construct_ic_stack(
         config.malicious_behaviour.malicious_flags.clone(),
         node_id,
         subnet_id,
-        None,
         Arc::clone(&crypto) as Arc<_>,
         Arc::clone(&crypto) as Arc<_>,
         Arc::clone(&state_manager) as Arc<_>,
@@ -313,12 +318,13 @@ pub fn construct_ic_stack(
         metrics_registry,
         config.http_handler.clone(),
         execution_services.ingress_filter,
-        execution_services.async_query_handler,
+        execution_services.query_execution_service.clone(),
         ingress_throttler,
         ingress_tx.clone(),
         Arc::clone(&state_manager) as Arc<_>,
         Arc::clone(&crypto) as Arc<_>,
         registry,
+        Arc::clone(&crypto) as Arc<_>,
         Arc::clone(&crypto) as Arc<_>,
         Arc::clone(&crypto) as Arc<_>,
         node_id,
@@ -330,13 +336,14 @@ pub fn construct_ic_stack(
         config.malicious_behaviour.malicious_flags,
         None,
         Arc::new(Pprof),
+        tracing_handle,
     );
 
     Ok((
         state_manager,
-        execution_services.sync_query_handler,
-        p2p_runner,
+        execution_services.query_execution_service,
         ingress_tx,
+        p2p_runner,
         xnet_endpoint,
     ))
 }

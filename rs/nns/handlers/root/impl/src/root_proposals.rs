@@ -1,7 +1,7 @@
 use candid::{CandidType, Deserialize};
 use dfn_core::api::{call, now, CanisterId};
 use ic_base_types::{NodeId, PrincipalId, SubnetId};
-use ic_ic00_types::CanisterInstallMode;
+use ic_management_canister_types::CanisterInstallMode;
 use ic_nervous_system_clients::{
     canister_id_record::CanisterIdRecord,
     canister_status::CanisterStatusResultFromManagementCanister,
@@ -140,7 +140,7 @@ impl GovernanceUpgradeRootProposal {
 }
 
 thread_local! {
-  static PROPOSALS: RefCell<BTreeMap<PrincipalId, GovernanceUpgradeRootProposal>> = RefCell::new(BTreeMap::new());
+  static PROPOSALS: RefCell<BTreeMap<PrincipalId, GovernanceUpgradeRootProposal>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 async fn get_current_governance_canister_wasm() -> Vec<u8> {

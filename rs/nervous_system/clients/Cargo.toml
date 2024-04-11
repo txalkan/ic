@@ -8,15 +8,15 @@ name = "ic_nervous_system_clients"
 path = "src/lib.rs"
 
 [dependencies]
-async-trait = "0.1.42"
+async-trait = { workspace = true }
 candid = { workspace = true }
 dfn_core = { path = "../../rust_canisters/dfn_core" }
 ic-base-types = { path = "../../types/base_types" }
 ic-nervous-system-proxied-canister-calls-tracker = { path = "../proxied_canister_calls_tracker" }
 ic-nervous-system-runtime = { path = "../runtime" }
 ic-error-types = { path = "../../types/error_types" }
-ic-ic00-types = { path = "../../types/ic00_types" }
-num-traits = "0.2.15"
+ic-management-canister-types = { path = "../../types/management_canister_types" }
+num-traits = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

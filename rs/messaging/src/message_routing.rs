@@ -5,7 +5,6 @@ use crate::{
 use ic_config::execution_environment::{BitcoinConfig, Config as HypervisorConfig};
 use ic_constants::SMALL_APP_SUBNET_MAX_SIZE;
 use ic_cycles_account_manager::CyclesAccountManager;
-use ic_ic00_types::EcdsaKeyId;
 use ic_interfaces::crypto::ErrorReproducibility;
 use ic_interfaces::{
     execution_environment::{IngressHistoryWriter, RegistryExecutionSettings, Scheduler},
@@ -15,6 +14,7 @@ use ic_interfaces_certified_stream_store::CertifiedStreamStore;
 use ic_interfaces_registry::RegistryClient;
 use ic_interfaces_state_manager::{CertificationScope, StateManager, StateManagerError};
 use ic_logger::{debug, fatal, info, warn, ReplicaLogger};
+use ic_management_canister_types::EcdsaKeyId;
 use ic_metrics::buckets::{add_bucket, decimal_buckets, decimal_buckets_with_zero};
 use ic_metrics::MetricsRegistry;
 use ic_protobuf::proxy::ProxyDecodeError;
@@ -43,7 +43,7 @@ use ic_types::{
     xnet::{StreamHeader, StreamIndex},
     Height, NodeId, NumBytes, PrincipalIdBlobParseError, RegistryVersion, SubnetId, Time,
 };
-use ic_utils::thread::JoinOnDrop;
+use ic_utils_thread::JoinOnDrop;
 #[cfg(test)]
 use mockall::automock;
 use prometheus::{Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec};
@@ -241,7 +241,7 @@ impl LatencyMetrics {
     /// Records a `MessageTime` entry for messages to/from `subnet_id` before
     /// `header.end` (if not already recorded).
     pub(crate) fn record_header(&mut self, subnet_id: SubnetId, header: &StreamHeader) {
-        self.with_timeline(subnet_id, |t| t.add_entry(header.end));
+        self.with_timeline(subnet_id, |t| t.add_entry(header.end()));
     }
 
     /// Observes message durations for all messages to/from `subnet_id` with
@@ -564,7 +564,6 @@ impl BatchProcessorImpl {
             stream_builder,
             log.clone(),
             metrics.clone(),
-            hypervisor_config.query_stats_epoch_length,
         ));
 
         Self {
@@ -646,25 +645,24 @@ impl BatchProcessorImpl {
         loop {
             match self.try_to_read_registry(registry_version, own_subnet_id) {
                 Ok(result) => return result,
-                Err(err) => {
-                    if let ReadRegistryError::Persistent(_) = err {
-                        // Increment the critical error counter in case of a persistent error.
-                        self.metrics.critical_error_failed_to_read_registry.inc();
-                        warn!(
-                            self.log,
-                            "{}: Persistent error reading registry @ version {}: {:?}.",
-                            CRITICAL_ERROR_FAILED_TO_READ_REGISTRY,
-                            registry_version,
-                            err
-                        );
-                    } else {
-                        warn!(
-                            self.log,
-                            "Unable to read registry @ version {}: {:?}. Trying again...",
-                            registry_version,
-                            err
-                        );
-                    }
+                Err(ReadRegistryError::Persistent(error_message)) => {
+                    // Increment the critical error counter in case of a persistent error.
+                    self.metrics.critical_error_failed_to_read_registry.inc();
+                    warn!(
+                        self.log,
+                        "{}: Persistent error reading registry @ version {}: {:?}.",
+                        CRITICAL_ERROR_FAILED_TO_READ_REGISTRY,
+                        registry_version,
+                        error_message
+                    );
+                }
+                Err(ReadRegistryError::Transient(error_message)) => {
+                    warn!(
+                        self.log,
+                        "Unable to read registry @ version {}: {:?}. Trying again...",
+                        registry_version,
+                        error_message
+                    );
                 }
             }
             sleep(std::time::Duration::from_millis(100));
@@ -899,7 +897,6 @@ impl BatchProcessorImpl {
         nodes: BTreeSet<NodeId>,
         registry_version: RegistryVersion,
     ) -> Result<NodePublicKeys, ReadRegistryError> {
-        use ic_crypto_internal_basic_sig_ed25519::{public_key_to_der, types::PublicKeyBytes};
         let mut node_public_keys: NodePublicKeys = BTreeMap::new();
         for node_id in nodes {
             let optional_public_key_proto = self
@@ -913,9 +910,11 @@ impl BatchProcessorImpl {
             match optional_public_key_proto {
                 Some(public_key_proto) => {
                     // If the public key protobuf is invalid, we continue without stalling the subnet.
-                    match PublicKeyBytes::try_from(&public_key_proto) {
-                        Ok(pk_bytes) => {
-                            node_public_keys.insert(node_id, public_key_to_der(pk_bytes));
+                    match ic_crypto_ed25519::PublicKey::convert_raw_to_der(
+                        &public_key_proto.key_value,
+                    ) {
+                        Ok(pk_der) => {
+                            node_public_keys.insert(node_id, pk_der);
                         }
                         Err(err) => {
                             self.metrics
@@ -923,7 +922,7 @@ impl BatchProcessorImpl {
                                 .inc();
                             warn!(
                                 self.log,
-                                "{}: the PublicKey protobuf of node {} stored in registry is not an valid Ed25519 public key, {}.",
+                                "{}: the PublicKey protobuf of node {} stored in registry is not a valid Ed25519 public key, {:?}.",
                                 CRITICAL_ERROR_MISSING_OR_INVALID_NODE_PUBLIC_KEYS,
                                 node_id,
                                 err

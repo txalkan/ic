@@ -6,7 +6,7 @@ use dfn_core::{
     over, over_async, over_init,
 };
 use ic_base_types::{PrincipalId, SubnetId};
-use ic_ic00_types::{
+use ic_management_canister_types::{
     CanisterInstallMode::Install, CanisterSettingsArgsBuilder, CreateCanisterArgs, InstallCodeArgs,
     Method, UpdateSettingsArgs,
 };
@@ -22,14 +22,16 @@ use ic_sns_wasm::{
     canister_stable_memory::CanisterStableMemory,
     init::SnsWasmCanisterInitPayload,
     pb::v1::{
-        AddWasmRequest, AddWasmResponse, DeployNewSnsRequest, DeployNewSnsResponse,
-        GetAllowedPrincipalsRequest, GetAllowedPrincipalsResponse,
-        GetDeployedSnsByProposalIdRequest, GetDeployedSnsByProposalIdResponse,
-        GetNextSnsVersionRequest, GetNextSnsVersionResponse, GetSnsSubnetIdsRequest,
-        GetSnsSubnetIdsResponse, GetWasmRequest, GetWasmResponse, InsertUpgradePathEntriesRequest,
+        update_allowed_principals_response::UpdateAllowedPrincipalsResult, AddWasmRequest,
+        AddWasmResponse, DeployNewSnsRequest, DeployNewSnsResponse, GetAllowedPrincipalsRequest,
+        GetAllowedPrincipalsResponse, GetDeployedSnsByProposalIdRequest,
+        GetDeployedSnsByProposalIdResponse, GetNextSnsVersionRequest, GetNextSnsVersionResponse,
+        GetSnsSubnetIdsRequest, GetSnsSubnetIdsResponse, GetWasmMetadataRequest,
+        GetWasmMetadataResponse, GetWasmRequest, GetWasmResponse, InsertUpgradePathEntriesRequest,
         InsertUpgradePathEntriesResponse, ListDeployedSnsesRequest, ListDeployedSnsesResponse,
-        ListUpgradeStepsRequest, ListUpgradeStepsResponse, UpdateAllowedPrincipalsRequest,
-        UpdateAllowedPrincipalsResponse, UpdateSnsSubnetListRequest, UpdateSnsSubnetListResponse,
+        ListUpgradeStepsRequest, ListUpgradeStepsResponse, SnsWasmError,
+        UpdateAllowedPrincipalsRequest, UpdateAllowedPrincipalsResponse,
+        UpdateSnsSubnetListRequest, UpdateSnsSubnetListResponse,
     },
     sns_wasm::SnsWasmCanister,
 };
@@ -125,7 +127,6 @@ impl CanisterApi for CanisterApiImpl {
             arg: init_payload,
             compute_allocation: None,
             memory_allocation: None,
-            query_allocation: None,
             sender_canister_version: Some(dfn_core::api::canister_version()),
         };
         let install_res: Result<(), (Option<i32>, String)> = dfn_core::call(
@@ -382,6 +383,22 @@ fn get_wasm_(get_wasm_payload: GetWasmRequest) -> GetWasmResponse {
     SNS_WASM.with(|sns_wasm| sns_wasm.borrow().get_wasm(get_wasm_payload))
 }
 
+#[export_name = "canister_query get_wasm_metadata"]
+fn get_wasm_metadata() {
+    over(candid_one, get_wasm_metadata_)
+}
+
+#[candid_method(query, rename = "get_wasm_metadata")]
+fn get_wasm_metadata_(
+    get_wasm_metadata_payload: GetWasmMetadataRequest,
+) -> GetWasmMetadataResponse {
+    SNS_WASM.with(|sns_wasm| {
+        sns_wasm
+            .borrow()
+            .get_wasm_metadata(get_wasm_metadata_payload)
+    })
+}
+
 #[export_name = "canister_query get_next_sns_version"]
 fn get_next_sns_version() {
     over(candid_one, get_next_sns_version_)
@@ -436,13 +453,17 @@ fn update_allowed_principals() {
 
 #[candid_method(update, rename = "update_allowed_principals")]
 fn update_allowed_principals_(
-    request: UpdateAllowedPrincipalsRequest,
+    _: UpdateAllowedPrincipalsRequest,
 ) -> UpdateAllowedPrincipalsResponse {
-    SNS_WASM.with(|sns_wasm| {
-        sns_wasm
-            .borrow_mut()
-            .update_allowed_principals(request, caller())
-    })
+    UpdateAllowedPrincipalsResponse {
+        update_allowed_principals_result: Some(UpdateAllowedPrincipalsResult::Error(
+            SnsWasmError {
+                message: "update_allowed_principals is obsolete. For launching an SNS, please \
+                          submit a CreateServiceNervousSystem proposal."
+                    .to_string(),
+            },
+        )),
+    }
 }
 
 #[export_name = "canister_query get_allowed_principals"]
@@ -452,7 +473,9 @@ fn get_allowed_principals() {
 
 #[candid_method(query, rename = "get_allowed_principals")]
 fn get_allowed_principals_(_request: GetAllowedPrincipalsRequest) -> GetAllowedPrincipalsResponse {
-    SNS_WASM.with(|sns_wasm| sns_wasm.borrow().get_allowed_principals())
+    GetAllowedPrincipalsResponse {
+        allowed_principals: vec![],
+    }
 }
 
 /// Add or remove SNS subnet IDs from the list of subnet IDs that SNS instances will be deployed to

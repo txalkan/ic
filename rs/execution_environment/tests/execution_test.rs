@@ -4,7 +4,7 @@ use ic_config::{
     execution_environment::Config as HypervisorConfig,
     subnet_config::{CyclesAccountManagerConfig, SubnetConfig},
 };
-use ic_ic00_types::{
+use ic_management_canister_types::{
     CanisterIdRecord, CanisterSettingsArgs, CanisterSettingsArgsBuilder, CanisterStatusResultV2,
     CreateCanisterArgs, EmptyBlob, Method, Payload, UpdateSettingsArgs, IC_00,
 };
@@ -217,6 +217,18 @@ fn test_canister_uninstall_restart() {
     assert_eq!(
         env.query(canister_id, "read", vec![]).unwrap_err().code(),
         ErrorCode::CanisterWasmModuleNotFound
+    );
+}
+
+#[test]
+fn query_nonexisting_canister() {
+    let env = StateMachine::new();
+    env.tick(); // needed to create a certified state
+
+    let canister_id = CanisterId::from_u64(0);
+    assert_eq!(
+        env.query(canister_id, "read", vec![]).unwrap_err().code(),
+        ErrorCode::CanisterNotFound
     );
 }
 
@@ -870,7 +882,7 @@ fn subnet_memory_reservation_works() {
             "update",
             call_args()
                 .other_side(b)
-                .on_reject(wasm().reject_code().reject_message().reject())
+                .on_reject(wasm().reject_message().reject())
                 .on_reply(
                     wasm()
                         .stable_grow(800 / num_cores as u32)
@@ -928,7 +940,7 @@ fn subnet_memory_reservation_scales_with_number_of_cores() {
             "update",
             call_args()
                 .other_side(b)
-                .on_reject(wasm().reject_code().reject_message().reject())
+                .on_reject(wasm().reject_message().reject())
                 .on_reply(
                     wasm()
                         .stable_grow(800)
@@ -1372,56 +1384,6 @@ fn test_update_settings_with_different_controllers_amount() {
             assert_rejected(res);
         }
     }
-}
-
-#[test]
-fn reserved_balance_limit_is_initialized_after_replica_upgrade() {
-    let subnet_config = SubnetConfig::new(SubnetType::Application);
-    let env = StateMachine::new_with_config(StateMachineConfig::new(
-        subnet_config,
-        HypervisorConfig::default(),
-    ));
-
-    let initial_cycles = Cycles::new(200 * B);
-
-    let canister_id = create_universal_canister_with_cycles(&env, None, initial_cycles);
-
-    // Clear the reserved balance limit to simulate a canister before the
-    // replica upgrade.
-    {
-        let mut state = env.get_latest_state().as_ref().clone();
-        let canister = state.canister_state_mut(&canister_id).unwrap();
-        assert_eq!(
-            canister.system_state.reserved_balance_limit(),
-            Some(CyclesAccountManagerConfig::application_subnet().default_reserved_balance_limit)
-        );
-        canister
-            .system_state
-            .clear_reserved_balance_limit_for_testing();
-        assert_eq!(canister.system_state.reserved_balance_limit(), None);
-        env.replace_canister_state(Arc::new(state), canister_id);
-    }
-
-    assert_eq!(
-        env.get_latest_state()
-            .canister_state(&canister_id)
-            .unwrap()
-            .system_state
-            .reserved_balance_limit(),
-        None
-    );
-
-    // Execute one round that will initialize the reserved balance limit.
-    env.tick();
-
-    assert_eq!(
-        env.get_latest_state()
-            .canister_state(&canister_id)
-            .unwrap()
-            .system_state
-            .reserved_balance_limit(),
-        Some(CyclesAccountManagerConfig::application_subnet().default_reserved_balance_limit),
-    )
 }
 
 #[test]

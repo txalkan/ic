@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const PORT: u32 = 8107;
-const VM_NAME: &str = "rosetta-test-neuron-info";
+const VM_NAME: &str = "rosetta-neuron-info";
 
 pub fn test(env: TestEnv) {
     let _logger = env.logger();
@@ -129,7 +129,7 @@ async fn test_neuron_info(
 ) {
     let acc = neuron_info.account_id;
     let neuron_index = neuron_info.neuron_subaccount_identifier;
-    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.into();
+    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.clone().into();
     let _expected_type = "NEURON_INFO".to_string();
     let res = do_multiple_txn_external(
         ros,
@@ -154,7 +154,7 @@ async fn test_neuron_info(
                 .first()
                 .expect("Expected one neuron info operation."),
             ic_rosetta_api::models::Operation {
-                _type: _expected_type,
+                type_: _expected_type,
                 ..
             }
         ));
@@ -203,7 +203,7 @@ async fn test_neuron_info_with_hotkey(
     _ledger: &LedgerClient,
     neuron_info: &NeuronDetails,
 ) {
-    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.into();
+    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.clone().into();
     let acc = neuron_info.account_id;
     let neuron_index = neuron_info.neuron_subaccount_identifier;
     let neuron_controller = neuron_info.principal_id;
@@ -265,7 +265,7 @@ async fn test_neuron_info_with_hotkey(
         assert_eq!(
             ic_rosetta_api::models::operation::OperationType::NeuronInfo,
             results.operations[0]
-                ._type
+                .type_
                 .parse::<OperationType>()
                 .unwrap(),
             "Expecting one neuron info operation."
@@ -315,7 +315,7 @@ async fn test_neuron_info_with_hotkey_raw(
     _ledger: &LedgerClient,
     neuron_info: &NeuronDetails,
 ) {
-    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.into();
+    let key_pair: Arc<EdKeypair> = neuron_info.key_pair.clone().into();
     let acc = neuron_info.account_id;
     let neuron_index = neuron_info.neuron_subaccount_identifier;
     let neuron_controller = neuron_info.principal_id;

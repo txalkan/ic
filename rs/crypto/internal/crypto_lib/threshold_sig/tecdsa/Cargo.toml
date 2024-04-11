@@ -18,9 +18,11 @@ ic-crypto-secrets-containers = { path = "../../../../secrets_containers" }
 ic-types = { path = "../../../../../types/types" }
 k256 = { workspace = true }
 p256 = { workspace = true }
+curve25519-dalek = { version = "^4.1.2", features = ["group", "precomputed-tables"] }
+group = "0.13"
 zeroize = { version = "1.4.3", features = ["zeroize_derive"] }
 rand = "0.8"
-hex = "0.4"
+hex = { workspace = true }
 hex-literal = "0.4.1"
 paste = "1.0.0"
 subtle = "2.4"
@@ -32,16 +34,12 @@ strum_macros = { workspace = true }
 lazy_static = "1.4.0"
 
 [dev-dependencies]
-assert_matches = "1.5.0"
+assert_matches = { workspace = true }
 criterion = { version = "0.5", features = ["html_reports"] }
 ic-crypto-test-utils-reproducible-rng = { path = "../../../../test_utils/reproducible_rng" }
 bip32 = { version = "0.5", features = ["secp256k1"] }
-num-traits = { version = "0.2.15" }
-strum = "0.25"
-
-[[bench]]
-name = "field_ops"
-harness = false
+num-traits = { workspace = true }
+strum = { workspace = true }
 
 [[bench]]
 name = "poly"

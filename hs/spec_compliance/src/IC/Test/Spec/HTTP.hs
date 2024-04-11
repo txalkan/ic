@@ -112,7 +112,7 @@ list_subset :: (Eq a) => [a] -> [a] -> Bool
 list_subset xs ys = all (\x -> elem x ys) xs
 
 headers_match :: [(T.Text, T.Text)] -> [(T.Text, T.Text)] -> Bool
-headers_match xs ys = all (\x -> elem x ys) xs && all (\(n, v) -> elem (n, v) xs || n == "host" || n == "content-length" || n == "accept-encoding" || n == "user-agent" && v == "ic/1.0") ys
+headers_match xs ys = all (\x -> elem x ys) xs && all (\(n, v) -> elem (n, v) xs || n == "host" || n == "content-length" || n == "accept" || n == "user-agent" && v == "ic/1.0") ys
 
 check_http_json :: String -> [(T.Text, T.Text)] -> BS.ByteString -> Maybe HttpRequest -> Assertion
 check_http_json _ _ _ Nothing = assertFailure "Could not parse the original HttpRequest from the response"
@@ -313,7 +313,7 @@ canister_http_calls sub =
             testCase "non-existent transform function" $ do
               let s = "hello_world"
               cid <- install ecid noop
-              ic_http_get_request' (ic00viaWithCyclesRefund 0 cid) sub "https://" ("ascii/" ++ s) Nothing (Just ("nonExistent", "")) cid >>= isReject [3],
+              ic_http_get_request' (ic00viaWithCyclesRefund 0 cid) sub "https://" ("ascii/" ++ s) Nothing (Just ("nonExistent", "")) cid >>= isReject [5],
             testCase "reference to a transform function exposed by another canister" $ do
               let s = "hello_world"
               cid <- install ecid noop

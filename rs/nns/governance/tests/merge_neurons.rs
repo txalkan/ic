@@ -18,8 +18,8 @@ use ic_nns_governance::{
 };
 use ic_nns_governance::{
     governance::{
-        DEPRECATED_TOPICS, MAX_DISSOLVE_DELAY_SECONDS,
-        MIN_DISSOLVE_DELAY_FOR_VOTE_ELIGIBILITY_SECONDS, ONE_YEAR_SECONDS,
+        MAX_DISSOLVE_DELAY_SECONDS, MIN_DISSOLVE_DELAY_FOR_VOTE_ELIGIBILITY_SECONDS,
+        ONE_YEAR_SECONDS,
     },
     pb::v1::{
         governance_error::ErrorType::{self, NotAuthorized, NotFound, PreconditionFailed},
@@ -33,8 +33,8 @@ use ic_nns_governance::{
             Followees,
         },
         proposal::{self},
-        Empty, GovernanceError, ManageNeuron, ManageNeuronResponse, NetworkEconomics, NeuronType,
-        Topic,
+        Empty, GovernanceError, ManageNeuron, ManageNeuronResponse, NetworkEconomics, Neuron,
+        NeuronType, Topic,
     },
 };
 use ic_sns_swap::pb::v1::governance_error::ErrorType::RequiresNotDissolving;
@@ -111,24 +111,13 @@ fn test_merge_neurons_fails() {
                 .set_joined_community_fund(10),
         )
         .add_neuron(
-            NeuronBuilder::new(6, icp_to_e8s(1), principal(1))
-                .set_dissolve_delay(MIN_DISSOLVE_DELAY_FOR_VOTE_ELIGIBILITY_SECONDS)
-                .set_maturity(icp_to_e8s(123))
-                .set_aging_since_timestamp(0)
-                .set_creation_timestamp(10)
-                .do_not_create_subaccount()
-                .set_kyc_verified(true)
-                .set_not_for_profit(true),
+            NeuronBuilder::new(6, icp_to_e8s(3_456), principal(123))
+                .set_dissolve_delay(MIN_DISSOLVE_DELAY_FOR_VOTE_ELIGIBILITY_SECONDS * 4),
         )
         .add_neuron(
-            NeuronBuilder::new(7, icp_to_e8s(1), principal(1))
+            NeuronBuilder::new(7, icp_to_e8s(3_456), principal(123))
                 .set_dissolve_delay(MIN_DISSOLVE_DELAY_FOR_VOTE_ELIGIBILITY_SECONDS * 4)
-                .set_maturity(icp_to_e8s(456))
-                .set_aging_since_timestamp(10)
-                .set_creation_timestamp(20)
-                .do_not_create_subaccount()
-                .set_kyc_verified(true)
-                .set_not_for_profit(true),
+                .set_neuron_type(NeuronType::Seed),
         )
         .add_neuron(
             NeuronBuilder::new(8, icp_to_e8s(1), principal(1))
@@ -220,15 +209,6 @@ fn test_merge_neurons_fails() {
                 .set_kyc_verified(true)
                 .set_not_for_profit(true),
         )
-        .add_neuron(
-            NeuronBuilder::new(22, icp_to_e8s(3_456), principal(123))
-                .set_dissolve_delay(MIN_DISSOLVE_DELAY_FOR_VOTE_ELIGIBILITY_SECONDS * 4),
-        )
-        .add_neuron(
-            NeuronBuilder::new(23, icp_to_e8s(3_456), principal(123))
-                .set_dissolve_delay(MIN_DISSOLVE_DELAY_FOR_VOTE_ELIGIBILITY_SECONDS * 4)
-                .set_neuron_type(NeuronType::Seed),
-        )
         .create();
 
     // 1. Source id and target id cannot be the same
@@ -245,8 +225,8 @@ fn test_merge_neurons_fails() {
             &NeuronId { id: 1 },
         ),
         Err(GovernanceError{error_type: code, error_message: msg})
-        if code == ErrorType::LedgerUpdateOngoing as i32 &&
-           msg == "Neuron has an ongoing ledger update.");
+        if code == ErrorType::InvalidCommand as i32 &&
+           msg == "Source id and target id cannot be the same");
 
     // 2. Target neuron must be owned by the caller
     assert_matches!(
@@ -336,7 +316,7 @@ fn test_merge_neurons_fails() {
         if code == PreconditionFailed as i32 &&
            msg == "Source neuron's not_for_profit field does not match target");
 
-    // 10. Cannot merge neurons that have been dedicated to the community fund
+    // 10. Cannot merge neurons that have been dedicated to the Neurons' Fund
     assert_matches!(
         nns.merge_neurons(
             &NeuronId { id: 1 },
@@ -345,7 +325,7 @@ fn test_merge_neurons_fails() {
         ),
         Err(GovernanceError{error_type: code, error_message: msg})
         if code == PreconditionFailed as i32 &&
-           msg == "Cannot merge neurons that have been dedicated to the community fund");
+           msg == "Cannot merge neurons that have been dedicated to the Neurons' Fund");
 
     // 10b. Switch source and destination to ensure condition still holds
     assert_matches!(
@@ -356,31 +336,9 @@ fn test_merge_neurons_fails() {
         ),
         Err(GovernanceError{error_type: code, error_message: msg})
         if code == PreconditionFailed as i32 &&
-           msg == "Cannot merge neurons that have been dedicated to the community fund");
+           msg == "Cannot merge neurons that have been dedicated to the Neurons' Fund");
 
-    // 11. Subaccount of source neuron to be merged must be present
-    assert_matches!(
-        nns.merge_neurons(
-            &NeuronId { id: 1 },
-            &principal(1),
-            &NeuronId { id: 7 },
-        ),
-        Err(GovernanceError{error_type: code, error_message: msg})
-        if code == NotFound as i32 &&
-           msg.contains("has invalid account"));
-
-    // 12. Subaccount of target neuron to be merged must be present
-    assert_matches!(
-        nns.merge_neurons(
-            &NeuronId { id: 6 },
-            &principal(1),
-            &NeuronId { id: 8 },
-        ),
-        Err(GovernanceError{error_type: code, error_message: msg})
-        if code == NotFound as i32 &&
-           msg.contains("has invalid account"));
-
-    // 13. Neither neuron can be the proposer of an open proposal
+    // 11. Neither neuron can be the proposer of an open proposal
     let _pid = nns.propose_and_vote("-----------P", "the unique proposal".to_string());
     assert_matches!(
         nns.merge_neurons(
@@ -392,7 +350,7 @@ fn test_merge_neurons_fails() {
         if code == PreconditionFailed as i32 &&
            msg == "Cannot merge neurons that are involved in open proposals");
 
-    // 14. Neither neuron can be the subject of a MergeNeuron proposal
+    // 12. Neither neuron can be the subject of a MergeNeuron proposal
     nns.governance
         .manage_neuron(
             &principal(11),
@@ -444,18 +402,18 @@ fn test_merge_neurons_fails() {
         if code == PreconditionFailed as i32 &&
            msg == "Cannot merge neurons that are involved in open proposals");
 
-    // 15. Source neuron must exist
+    // 13. Source neuron must exist
     assert_matches!(
         nns.merge_neurons(
-            &NeuronId { id: 6 },
+            &NeuronId { id: 1 },
             &principal(1),
             &NeuronId { id: 100 },
         ),
         Err(GovernanceError{error_type: code, error_message: msg})
         if code == NotFound as i32 &&
-           msg == "Neuron not found: NeuronId { id: 100 }");
+           msg == "Source neuron not found");
 
-    // 16. Target neuron must exist
+    // 14. Target neuron must exist
     assert_matches!(
         nns.merge_neurons(
             &NeuronId { id: 100 },
@@ -464,9 +422,9 @@ fn test_merge_neurons_fails() {
         ),
         Err(GovernanceError{error_type: code, error_message: msg})
         if code == NotFound as i32 &&
-           msg == "Neuron not found: NeuronId { id: 100 }");
+           msg == "Target neuron not found");
 
-    // 17. Neurons with different ManageNeuron lists cannot be merged
+    // 15. Neurons with different ManageNeuron lists cannot be merged
     assert_matches!(
         nns.merge_neurons(
             &NeuronId { id: 16 },
@@ -477,7 +435,7 @@ fn test_merge_neurons_fails() {
         if code == PreconditionFailed as i32 &&
            msg == "ManageNeuron following of source and target does not match");
 
-    // 18. Neurons with resp. without ManageNeuron cannot be merged
+    // 16. Neurons with resp. without ManageNeuron cannot be merged
     assert_matches!(
         nns.merge_neurons(
             &NeuronId { id: 16 },
@@ -488,12 +446,12 @@ fn test_merge_neurons_fails() {
         if code == PreconditionFailed as i32 &&
            msg == "ManageNeuron following of source and target does not match");
 
-    // 19. Neurons with unequal NeuronType can't be merged
+    // 17. Neurons with unequal NeuronType can't be merged
     assert_matches!(
         nns.merge_neurons(
-            &NeuronId { id: 22 },
+            &NeuronId { id: 6 },
             &principal(123),
-            &NeuronId { id: 23 },
+            &NeuronId { id: 7 },
         ),
         Err(GovernanceError{error_type: code, error_message: msg})
         if code == PreconditionFailed as i32 &&
@@ -765,14 +723,14 @@ fn do_test_merge_neurons(
                 source_neuron,
                 nns.governance
                     .neuron_store
-                    .with_neuron(&source_neuron_id, |n| n.clone())
+                    .with_neuron(&source_neuron_id, |n| Neuron::from(n.clone()))
                     .unwrap()
             );
             pretty_assertions::assert_eq!(
                 target_neuron,
                 nns.governance
                     .neuron_store
-                    .with_neuron(&target_neuron_id, |n| n.clone())
+                    .with_neuron(&target_neuron_id, |n| Neuron::from(n.clone()))
                     .unwrap()
             );
             pretty_assertions::assert_eq!(
@@ -975,12 +933,12 @@ fn test_merge_neurons_small(
     n1_stake in 0u64..50_000,
     n1_maturity in 0u64..500_000_000,
     n1_fees in 0u64..20_000,
-    n1_dissolve in 0u64..MAX_DISSOLVE_DELAY_SECONDS,
+    n1_dissolve in 1u64..MAX_DISSOLVE_DELAY_SECONDS,
     n1_age in 0u64..315_360_000,
     n2_stake in 0u64..50_000,
     n2_maturity in 0u64..500_000_000,
     n2_fees in 0u64..20_000,
-    n2_dissolve in 0u64..MAX_DISSOLVE_DELAY_SECONDS,
+    n2_dissolve in 1u64..MAX_DISSOLVE_DELAY_SECONDS,
     n2_age in 0u64..315_360_000
 ) {
     do_test_merge_neurons(
@@ -1003,12 +961,12 @@ fn test_merge_neurons_normal(
 
     n1_maturity in 0u64..500_000_000,
     n1_fees in 0u64..20_000,
-    n1_dissolve in 0u64..MAX_DISSOLVE_DELAY_SECONDS,
+    n1_dissolve in 1u64..MAX_DISSOLVE_DELAY_SECONDS,
     n1_age in 0u64..315_360_000,
     n2_stake in 0u64..500_000_000,
     n2_maturity in 0u64..500_000_000,
     n2_fees in 0u64..20_000,
-    n2_dissolve in 0u64..MAX_DISSOLVE_DELAY_SECONDS,
+    n2_dissolve in 1u64..MAX_DISSOLVE_DELAY_SECONDS,
     n2_age in 0u64..315_360_000
 ) {
     do_test_merge_neurons(
@@ -1114,73 +1072,4 @@ fn test_neuron_merge_follow() {
             ])]),
         ])
     );
-}
-
-/// Test that the full neurons returned in the MergeResponse omit deprecated topics from
-/// each neuron's followees field.
-#[test]
-fn test_merge_neuron_omits_deprecated_topics_from_followees() {
-    let deprecated_topic = *DEPRECATED_TOPICS.first().unwrap();
-    let normal_topic = Topic::Governance;
-
-    let mut nns = NNSBuilder::new()
-        .set_economics(NetworkEconomics::with_default_values())
-        .add_neuron(
-            NeuronBuilder::new(1, icp_to_e8s(1), principal(1))
-                .set_dissolve_delay(MIN_DISSOLVE_DELAY_FOR_VOTE_ELIGIBILITY_SECONDS)
-                .insert_followees(
-                    deprecated_topic,
-                    Followees {
-                        followees: vec![NeuronId { id: 3 }],
-                    },
-                )
-                .insert_followees(
-                    normal_topic,
-                    Followees {
-                        followees: vec![NeuronId { id: 3 }],
-                    },
-                ),
-        )
-        .add_neuron(
-            NeuronBuilder::new(2, icp_to_e8s(1), principal(1))
-                .set_dissolve_delay(MIN_DISSOLVE_DELAY_FOR_VOTE_ELIGIBILITY_SECONDS)
-                .insert_followees(
-                    deprecated_topic,
-                    Followees {
-                        followees: vec![NeuronId { id: 3 }],
-                    },
-                )
-                .insert_followees(
-                    normal_topic,
-                    Followees {
-                        followees: vec![NeuronId { id: 3 }],
-                    },
-                ),
-        )
-        .create();
-
-    let response =
-        nns.simulate_merge_neurons(&NeuronId { id: 1 }, &principal(1), &NeuronId { id: 2 });
-
-    let merge_response = match response.command.unwrap() {
-        CommandResponse::Merge(merge) => merge,
-        _ => panic!("Expected a Merge response from the ManageNeuron API"),
-    };
-
-    let target_neuron = merge_response
-        .target_neuron
-        .expect("Expected target_neuron to be present");
-    let source_neuron = merge_response
-        .source_neuron
-        .expect("Expected source_neuron to be present");
-
-    assert!(!target_neuron
-        .followees
-        .contains_key(&(deprecated_topic as i32)));
-    assert!(target_neuron.followees.contains_key(&(normal_topic as i32)));
-
-    assert!(!source_neuron
-        .followees
-        .contains_key(&(deprecated_topic as i32)));
-    assert!(source_neuron.followees.contains_key(&(normal_topic as i32)));
 }

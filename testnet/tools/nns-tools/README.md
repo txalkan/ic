@@ -51,7 +51,7 @@ PATH=$PATH:$HOME/bin
 
 ### How to deploy a `recovered_mainnet_nns` dynamic testnet?
 
-This takes approximately 10-15 minutes to run.
+This takes a bit over 20 minutes to run.
 
 ```bash
 # You might be able to use devenv instead, but I have had problems with that.
@@ -60,6 +60,9 @@ This takes approximately 10-15 minutes to run.
 # without it, if you walk away from your computer for a while, your ssh
 # connection will be lost, and as a result, `recovered_mainnet_nns` will
 # not be kept alive.
+#
+# Note that, instead of zh1-spm22, you can also SSH to your devenv VM
+# but that will be a bit slower (~30 minutes).
 caffeinate ssh -A zh1-spm22.zh1.dfinity.network
 
 # Check out recent commit of the ic repo. It does not have to be the release candidate commit,
@@ -73,13 +76,15 @@ tmux -S release
 
 ./gitlab-ci/container/container-run.sh
 
-rm -rf test_tmpdir; \
+test_tmpdir="/tmp/$(whoami)/test_tmpdir"; \
+echo "test_tmpdir=$test_tmpdir"; \
+rm -rf "$test_tmpdir"; \
     ict testnet create recovered_mainnet_nns \
         --lifetime-mins 1440 \
         --set-required-host-features=dc=zh1 \
         --verbose \
         -- \
-        --test_tmpdir=test_tmpdir
+        --test_tmpdir="$test_tmpdir"
 ```
 
 Let us explain some of the arguments used above:
@@ -92,8 +97,8 @@ Let us explain some of the arguments used above:
   the backup pod hosted in `zh1` and upload it from the test driver, running in `zh1`, to the IC
   deployed in `zh1`.
 
-* `--test_tmpdir=test_tmpdir` makes sure all the artifacts produced by the test driver are
-  accessible on the filesystem in directory `test_tmpdir` which we need later on.
+* `--test_tmpdir=/tmp/$(whoami)/test_tmpdir` makes sure all the artifacts produced by the test driver are
+  accessible on the filesystem in directory `/tmp/$(whoami)/test_tmpdir` which we need later on.
 
 Once `ict` finishes setting things up, it stays running in the foreground. At that point, you should
 see (something like) this in green:
@@ -108,19 +113,11 @@ You can properly dispose of the testnet by killing the `ict` process.
 ### Interacting Afterwards
 
 To interact with the testnet using the shell scripts in this directory, you'll need to run
-`set_testnet_env_variables.sh` deep within `test_tmpdir`. This script can be sourced in your current
-shell. Just look for a log line similar to the following:
-
-```
-...ic_mainnet_nns_recovery/src/lib.rs... source "/ic/test_tmpdir/_tmp/c689987f6ae05176e3097f73827ab180/setup/set_testnet_env_variables.sh"
-```
-
-Then go into another container again and source that script:
+`set_testnet_env_variables.sh` deep within `/tmp/$(whoami)/test_tmpdir`. There is a helper function to do this for you:
 
 ```
 ./gitlab-ci/container/container-run.sh
-
-source "/ic/test_tmpdir/_tmp/c689987f6ae05176e3097f73827ab180/setup/set_testnet_env_variables.sh"
+. ./testnet/tools/nns-tools/cmd.sh set_testnet_env_variables
 ```
 
 Once you have those definitions, the following commands become possible:

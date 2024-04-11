@@ -10,6 +10,7 @@ readonly IC_BOUNDARY_CONFIG="${BOOT_DIR}/ic_boundary.conf"
 readonly NNS_CONFIG="${BOOT_DIR}/nns.conf"
 readonly NNS_PEM="${BOOT_DIR}/nns_public_key.pem"
 
+readonly CFG_DIR='/run/ic-node/etc/ic-boundary'
 readonly RUN_DIR='/run/ic-node/etc/default'
 readonly ENV_FILE="${RUN_DIR}/${SERVICE_NAME}"
 
@@ -60,16 +61,32 @@ function generate_config() {
     cat >"${ENV_FILE}" <<EOF
 NNS_URL=${NNS_URL}
 CACHE_SIZE=1073741824
-CACHE_ITEM_MAX_SIZE=131072
+CACHE_ITEM_MAX_SIZE=10485760
 CACHE_TTL=1
 MAX_CONCURRENCY=${MAX_CONCURRENCY:-}
 SHED_EWMA_PARAM=${SHED_EWMA_PARAM:-}
 EOF
 }
 
+function setup_geolite2_dbs() {
+    local -r BOOT_DBS="${BOOT_DIR}/geolite2_dbs"
+    local -r EMPTY_DBS='/etc/geoip'
+
+    if [[ ! -d "${BOOT_DBS}" ]]; then
+        err "missing geolite2 dbs dir '${BOOT_DBS}', defaulting to empty dbs '${EMPTY_DBS}'"
+        local -r DBS_SRC="${EMPTY_DBS}"
+    else
+        local -r DBS_SRC="${BOOT_DBS}"
+    fi
+
+    mkdir -p "${CFG_DIR}"
+    cp "${DBS_SRC}/GeoLite2-Country.mmdb" "${CFG_DIR}"
+}
+
 function main() {
     read_variables
     generate_config
+    setup_geolite2_dbs
     mkdir -p /var/opt/registry/store
 }
 

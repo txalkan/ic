@@ -4,6 +4,7 @@ use crate::{
         get_governance_canister, submit_update_elected_replica_versions_proposal,
         submit_update_subnet_replica_version_proposal, vote_execute_proposal_assert_executed,
     },
+    retry_with_msg, retry_with_msg_async,
     util::runtime_from_url,
 };
 use anyhow::{bail, Result};
@@ -11,7 +12,7 @@ use ic_canister_client::Sender;
 use ic_http_utils::file_downloader::FileDownloader;
 use ic_nervous_system_common_test_keys::TEST_NEURON_1_OWNER_KEYPAIR;
 use ic_nns_common::types::NeuronId;
-use ic_nns_test_utils::ids::TEST_NEURON_1_ID;
+use ic_nns_governance::init::TEST_NEURON_1_ID;
 use ic_protobuf::registry::replica_version::v1::BlessedReplicaVersions;
 use ic_registry_keys::make_blessed_replica_versions_key;
 use ic_registry_nns_data_provider::registry::RegistryCanister;
@@ -57,12 +58,18 @@ pub(crate) async fn fetch_update_file_sha256_with_retry(
     version_str: &str,
     is_test_img: bool,
 ) -> String {
-    retry_async(log, READY_WAIT_TIMEOUT, RETRY_BACKOFF, || async {
-        match fetch_update_file_sha256(version_str, is_test_img).await {
-            Err(err) => bail!(err),
-            Ok(sha) => Ok(sha),
+    retry_with_msg_async!(
+        format!("fetch update file sha256 of version {}", version_str),
+        log,
+        READY_WAIT_TIMEOUT,
+        RETRY_BACKOFF,
+        || async {
+            match fetch_update_file_sha256(version_str, is_test_img).await {
+                Err(err) => bail!(err),
+                Ok(sha) => Ok(sha),
+            }
         }
-    })
+    )
     .await
     .expect("Failed to fetch sha256 file.")
 }
@@ -145,7 +152,12 @@ pub(crate) fn assert_assigned_replica_version(
         Finished,
     }
     let mut state = State::Uninitialized;
-    let result = retry(
+    let result = retry_with_msg!(
+        format!(
+            "Check if node {} is healthy and running replica version {}",
+            node.get_ip_addr(),
+            expected_version
+        ),
         logger.clone(),
         secs(600),
         secs(10),
@@ -170,7 +182,7 @@ pub(crate) fn assert_assigned_replica_version(
                 state = State::Reboot;
                 bail!("Error reading replica version: {:?}", err)
             }
-        },
+        }
     );
     if let Err(error) = result {
         info!(logger, "Error: {}", error);

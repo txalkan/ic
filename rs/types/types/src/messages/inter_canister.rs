@@ -1,8 +1,10 @@
-use crate::{ingress::WasmResult, CanisterId, CountBytes, Cycles, Funds, NumBytes, Time};
+use crate::{
+    ingress::WasmResult, time::CoarseTime, CanisterId, CountBytes, Cycles, Funds, NumBytes, Time,
+};
 use ic_error_types::{RejectCode, TryFromError, UserError};
 #[cfg(test)]
 use ic_exhaustive_derive::ExhaustiveSet;
-use ic_ic00_types::{
+use ic_management_canister_types::{
     CanisterIdRecord, CanisterInfoRequest, ClearChunkStoreArgs, InstallChunkedCodeArgs,
     InstallCodeArgsV2, Method, Payload as _, ProvisionalTopUpCanisterArgs, StoredChunksArgs,
     UpdateSettingsArgs, UploadChunkArgs,
@@ -17,10 +19,19 @@ use phantom_newtype::Id;
 use serde::{Deserialize, Serialize};
 use std::{
     convert::{From, TryFrom, TryInto},
+    hash::{Hash, Hasher},
     mem::size_of,
     str::FromStr,
     sync::Arc,
 };
+
+#[cfg(test)]
+mod tests;
+
+/// Special value for the `deadline` field of `Requests`, `Callbacks`,
+/// `CallOrigins` and `Responses` signifying "no deadline", i.e. a guaranteed
+/// response call.
+pub const NO_DEADLINE: CoarseTime = CoarseTime::from_secs_since_unix_epoch(0);
 
 pub struct CallbackIdTag;
 /// A value used as an opaque nonce to couple outgoing calls with their
@@ -85,6 +96,8 @@ pub struct Request {
     #[serde(with = "serde_bytes")]
     pub method_payload: Vec<u8>,
     pub metadata: Option<RequestMetadata>,
+    /// If non-zero, this is a best-effort call.
+    pub deadline: CoarseTime,
 }
 
 impl Request {
@@ -355,7 +368,7 @@ impl From<Result<Option<WasmResult>, UserError>> for Payload {
 }
 
 /// Canister-to-canister response message.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ExhaustiveSet))]
 pub struct Response {
     pub originator: CanisterId,
@@ -363,12 +376,42 @@ pub struct Response {
     pub originator_reply_callback: CallbackId,
     pub refund: Cycles,
     pub response_payload: Payload,
+    /// If non-zero, this is a best-effort call.
+    pub deadline: CoarseTime,
 }
 
 impl Response {
     /// Returns the size in bytes of this `Response`'s payload.
     pub fn payload_size_bytes(&self) -> NumBytes {
         self.response_payload.size_bytes()
+    }
+}
+
+/// Custom hash implementation, ensuring consistency with previous version
+/// without a `deadline`.
+///
+/// This is a temporary workaround for Consensus integrity checks relying on
+/// hasning Rust structs. This can be dropped once those checks are removed.
+impl Hash for Response {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Response {
+            originator,
+            respondent,
+            originator_reply_callback,
+            refund,
+            response_payload,
+            deadline,
+        } = self;
+
+        originator.hash(state);
+        respondent.hash(state);
+        originator_reply_callback.hash(state);
+        refund.hash(state);
+        response_payload.hash(state);
+
+        if *deadline != NO_DEADLINE {
+            deadline.hash(state);
+        }
     }
 }
 
@@ -405,7 +448,7 @@ impl RequestOrResponse {
     pub fn payload_size_bytes(&self) -> NumBytes {
         match self {
             RequestOrResponse::Request(req) => req.payload_size_bytes(),
-            RequestOrResponse::Response(resp) => resp.response_payload.size_bytes(),
+            RequestOrResponse::Response(resp) => resp.payload_size_bytes(),
         }
     }
 
@@ -416,6 +459,20 @@ impl RequestOrResponse {
             RequestOrResponse::Response(resp) => resp.refund,
         }
     }
+
+    /// Returns the deadline of this message, `NO_DEADLINE` if not set.
+    pub fn deadline(&self) -> CoarseTime {
+        match self {
+            RequestOrResponse::Request(req) => req.deadline,
+            RequestOrResponse::Response(resp) => resp.deadline,
+        }
+    }
+
+    /// Returns `true` if this is the request or response of a best-effort call
+    /// (i.e. if it has a non-zero deadline).
+    pub fn is_best_effort(&self) -> bool {
+        self.deadline() != NO_DEADLINE
+    }
 }
 
 /// Convenience `CountBytes` implementation that returns the same value as
@@ -425,8 +482,7 @@ impl CountBytes for Request {
     fn count_bytes(&self) -> usize {
         size_of::<RequestOrResponse>()
             + size_of::<Request>()
-            + self.method_name.len()
-            + self.method_payload.len()
+            + self.payload_size_bytes().get() as usize
     }
 }
 
@@ -435,11 +491,9 @@ impl CountBytes for Request {
 /// `self` into a `RequestOrResponse` only to calculate its estimated byte size.
 impl CountBytes for Response {
     fn count_bytes(&self) -> usize {
-        let var_fields_size = match &self.response_payload {
-            Payload::Data(data) => data.len(),
-            Payload::Reject(context) => context.message.len(),
-        };
-        size_of::<RequestOrResponse>() + size_of::<Response>() + var_fields_size
+        size_of::<RequestOrResponse>()
+            + size_of::<Response>()
+            + self.payload_size_bytes().get() as usize
     }
 }
 
@@ -487,6 +541,7 @@ impl From<&Request> for pb_queues::Request {
             method_payload: req.method_payload.clone(),
             cycles_payment: Some((req.payment).into()),
             metadata: req.metadata.as_ref().map(From::from),
+            deadline_seconds: req.deadline.as_secs_since_unix_epoch(),
         }
     }
 }
@@ -522,6 +577,7 @@ impl TryFrom<pb_queues::Request> for Request {
             method_name: req.method_name,
             method_payload: req.method_payload,
             metadata: req.metadata.map(From::from),
+            deadline: CoarseTime::from_secs_since_unix_epoch(req.deadline_seconds),
         })
     }
 }
@@ -564,6 +620,7 @@ impl From<&Response> for pb_queues::Response {
             refund: Some((&Funds::new(rep.refund)).into()),
             response_payload: Some(p),
             cycles_refund: Some((rep.refund).into()),
+            deadline_seconds: rep.deadline.as_secs_since_unix_epoch(),
         }
     }
 }
@@ -594,6 +651,7 @@ impl TryFrom<pb_queues::Response> for Response {
             originator_reply_callback: rep.originator_reply_callback.into(),
             refund,
             response_payload,
+            deadline: CoarseTime::from_secs_since_unix_epoch(rep.deadline_seconds),
         })
     }
 }

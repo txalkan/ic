@@ -129,7 +129,6 @@
 //!
 //! Thus, instead of randomly selecting a node to fetch registry updates, it is
 //! better to let the user select a node.
-//!
 
 use super::config::NODES_INFO;
 use super::driver_setup::SSH_AUTHORIZED_PRIV_KEYS_DIR;
@@ -140,6 +139,10 @@ use crate::driver::constants::{self, kibana_link, SSH_USERNAME};
 use crate::driver::farm::{Farm, GroupSpec};
 use crate::driver::log_events;
 use crate::driver::test_env::{HasIcPrepDir, SshKeyGen, TestEnv, TestEnvAttribute};
+use crate::k8s::tnet::TNet;
+use crate::k8s::virtualmachine::{delete_vm, restart_vm, start_vm};
+use crate::retry_with_msg;
+use crate::retry_with_msg_async;
 use crate::util::{block_on, create_agent};
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -173,7 +176,7 @@ use ic_utils::interfaces::ManagementCanister;
 use icp_ledger::{AccountIdentifier, LedgerCanisterInitPayload, Tokens};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use slog::{error, info, warn, Logger};
+use slog::{debug, error, info, warn, Logger};
 use ssh2::Session;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -483,6 +486,22 @@ impl TopologySnapshot {
         result
     }
 
+    /// Like `block_for_newer_registry_version` but with a custom `duration` and `backoff`.
+    pub async fn block_for_newer_registry_version_within_duration(
+        &self,
+        duration: Duration,
+        backoff: Duration,
+    ) -> Result<TopologySnapshot> {
+        let minimum_version = self.local_registry.get_latest_version() + RegistryVersion::from(1);
+        let result = self
+            .block_for_min_registry_version_within_duration(minimum_version, duration, backoff)
+            .await;
+        if let Ok(ref topology) = result {
+            info!(self.env.logger(), "{}", topology);
+        }
+        result
+    }
+
     /// This method blocks and repeatedly fetches updates from the registry
     /// canister until the latest available registry version is higher or equal
     /// to `min_version`.
@@ -503,21 +522,41 @@ impl TopologySnapshot {
     ) -> Result<TopologySnapshot> {
         let duration = Duration::from_secs(180);
         let backoff = Duration::from_secs(2);
+        self.block_for_min_registry_version_within_duration(min_version, duration, backoff)
+            .await
+    }
+
+    /// Like `block_for_min_registry_version` but with a custom `duration` and `backoff`.
+    pub async fn block_for_min_registry_version_within_duration(
+        &self,
+        min_version: RegistryVersion,
+        duration: Duration,
+        backoff: Duration,
+    ) -> Result<TopologySnapshot> {
         let mut latest_version = self.local_registry.get_latest_version();
         if min_version > latest_version {
-            latest_version = retry_async(&self.env.logger(), duration, backoff, || async move {
-                self.local_registry.sync_with_nns().await?;
-                let latest_version = self.local_registry.get_latest_version();
-                if latest_version >= min_version {
-                    Ok(latest_version)
-                } else {
-                    bail!(
-                        "latest_version: {}, expected minimum version: {}",
-                        latest_version,
-                        min_version
-                    )
+            latest_version = retry_with_msg_async!(
+                format!(
+                    "check if latest registry version >= {}",
+                    min_version.to_string()
+                ),
+                &self.env.logger(),
+                duration,
+                backoff,
+                || async move {
+                    self.local_registry.sync_with_nns().await?;
+                    let latest_version = self.local_registry.get_latest_version();
+                    if latest_version >= min_version {
+                        Ok(latest_version)
+                    } else {
+                        bail!(
+                            "latest_version: {}, expected minimum version: {}",
+                            latest_version,
+                            min_version
+                        )
+                    }
                 }
-            })
+            )
             .await?;
         }
         Ok(Self {
@@ -544,34 +583,40 @@ impl TopologySnapshot {
         let backoff = Duration::from_secs(2);
         let prev_version: Arc<TokioMutex<RegistryVersion>> =
             Arc::new(TokioMutex::new(self.local_registry.get_latest_version()));
-        let version = retry_async(&self.env.logger(), duration, backoff, || {
-            let prev_version = prev_version.clone();
-            async move {
-                let mut prev_version = prev_version.lock().await;
-                self.local_registry.sync_with_nns().await?;
-                let version = self.local_registry.get_latest_version();
-                info!(
-                    &self.env.logger(),
-                    "previous registry version: {}; obtained from NNS: {}",
-                    prev_version,
-                    version.clone()
-                );
-                if version == *prev_version {
+        let version = retry_with_msg_async!(
+            "block_for_newest_mainnet_registry_version",
+            &self.env.logger(),
+            duration,
+            backoff,
+            || {
+                let prev_version = prev_version.clone();
+                async move {
+                    let mut prev_version = prev_version.lock().await;
+                    self.local_registry.sync_with_nns().await?;
+                    let version = self.local_registry.get_latest_version();
                     info!(
                         &self.env.logger(),
-                        "registry version obtained from NNS saturated at {}",
+                        "previous registry version: {}; obtained from NNS: {}",
+                        prev_version,
                         version.clone()
                     );
-                    Ok(version)
-                } else {
-                    *prev_version = version;
-                    bail!(
-                        "latest registry version obtained from NNS: {}; saturating ...",
-                        version
-                    )
+                    if version == *prev_version {
+                        info!(
+                            &self.env.logger(),
+                            "registry version obtained from NNS saturated at {}",
+                            version.clone()
+                        );
+                        Ok(version)
+                    } else {
+                        *prev_version = version;
+                        bail!(
+                            "latest registry version obtained from NNS: {}; saturating ...",
+                            version
+                        )
+                    }
                 }
             }
-        })
+        )
         .await?;
         Ok(Self {
             registry_version: version,
@@ -943,8 +988,6 @@ pub trait HasIcDependencies {
     fn get_ic_os_update_img_test_sha256(&self) -> Result<String>;
     fn get_malicious_ic_os_update_img_url(&self) -> Result<Url>;
     fn get_malicious_ic_os_update_img_sha256(&self) -> Result<String>;
-    fn get_boundary_node_snp_img_url(&self) -> Result<Url>;
-    fn get_boundary_node_snp_img_sha256(&self) -> Result<String>;
     fn get_boundary_node_img_url(&self) -> Result<Url>;
     fn get_boundary_node_img_sha256(&self) -> Result<String>;
     fn get_mainnet_ic_os_img_url(&self) -> Result<Url>;
@@ -987,24 +1030,13 @@ impl<T: HasDependencies + HasTestEnv> HasIcDependencies for T {
 
     fn get_ic_os_img_url(&self) -> Result<Url> {
         let url =
-            match InfraProvider::read_attribute(&self.test_env()) {
-                InfraProvider::Farm => self
-                    .read_dependency_from_env_to_string("ENV_DEPS__DEV_DISK_IMG_TAR_ZST_CAS_URL")?,
-                InfraProvider::K8s => self
-                    .read_dependency_from_env_to_string("ENV_DEPS__DEV_DISK_IMG_TAR_GZ_CAS_URL")?,
-            };
+            self.read_dependency_from_env_to_string("ENV_DEPS__DEV_DISK_IMG_TAR_ZST_CAS_URL")?;
         Ok(Url::parse(&url)?)
     }
 
     fn get_ic_os_img_sha256(&self) -> Result<String> {
-        let sha256 = match InfraProvider::read_attribute(&self.test_env()) {
-            InfraProvider::Farm => {
-                self.read_dependency_from_env_to_string("ENV_DEPS__DEV_DISK_IMG_TAR_ZST_SHA256")?
-            }
-            InfraProvider::K8s => {
-                self.read_dependency_from_env_to_string("ENV_DEPS__DEV_DISK_IMG_TAR_GZ_SHA256")?
-            }
-        };
+        let sha256 =
+            self.read_dependency_from_env_to_string("ENV_DEPS__DEV_DISK_IMG_TAR_ZST_SHA256")?;
         bail_if_sha256_invalid(&sha256, "ic_os_img_sha256")?;
         Ok(sha256)
     }
@@ -1062,19 +1094,6 @@ impl<T: HasDependencies + HasTestEnv> HasIcDependencies for T {
             "ENV_DEPS__DEV_MALICIOUS_UPDATE_IMG_TAR_ZST_SHA256",
         )?;
         bail_if_sha256_invalid(&sha256, "ic_os_update_img_sha256")?;
-        Ok(sha256)
-    }
-
-    fn get_boundary_node_snp_img_url(&self) -> Result<Url> {
-        let dep_rel_path = "ic-os/boundary-guestos/envs/dev-sev/disk-img.tar.zst.cas-url";
-        let result = self.read_dependency_to_string(dep_rel_path)?;
-        Ok(Url::parse(&result)?)
-    }
-
-    fn get_boundary_node_snp_img_sha256(&self) -> Result<String> {
-        let dep_rel_path = "ic-os/boundary-guestos/envs/dev-sev/disk-img.tar.zst.sha256";
-        let sha256 = self.read_dependency_to_string(dep_rel_path)?;
-        bail_if_sha256_invalid(&sha256, "boundary_node_snp_img_sha256")?;
         Ok(sha256)
     }
 
@@ -1141,10 +1160,19 @@ impl<T: HasDependencies + HasTestEnv> HasIcDependencies for T {
     }
 }
 
-fn fetch_sha256(base_url: String, file: &str, logger: Logger) -> Result<String> {
-    let sha256sums_url = format!("{base_url}/SHA256SUMS");
+pub const FETCH_SHA256SUMS_RETRY_TIMEOUT: Duration = Duration::from_secs(120);
+pub const FETCH_SHA256SUMS_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
-    let response = reqwest::blocking::get(sha256sums_url)?;
+fn fetch_sha256(base_url: String, file: &str, logger: Logger) -> Result<String> {
+    let url = &format!("{base_url}/SHA256SUMS");
+    let response = retry_with_msg!(
+        format!("GET {url}"),
+        logger.clone(),
+        FETCH_SHA256SUMS_RETRY_TIMEOUT,
+        FETCH_SHA256SUMS_RETRY_BACKOFF,
+        || reqwest::blocking::get(url).map_err(|e| anyhow!("{:?}", e))
+    )?;
+
     if !response.status().is_success() {
         error!(
             logger,
@@ -1185,7 +1213,7 @@ impl HasGroupSetup for TestEnv {
                 "Group {} already set up.", group_setup.infra_group_name
             );
         } else {
-            let group_setup = GroupSetup::new(group_base_name);
+            let group_setup = GroupSetup::new(group_base_name.clone());
             match InfraProvider::read_attribute(self) {
                 InfraProvider::Farm => {
                     let farm_base_url = FarmBaseUrl::read_attribute(self);
@@ -1205,7 +1233,12 @@ impl HasGroupSetup for TestEnv {
                     )
                     .unwrap();
                 }
-                InfraProvider::K8s => {}
+                InfraProvider::K8s => {
+                    let mut tnet =
+                        TNet::new(&group_base_name.replace('_', "-")).expect("new tnet failed");
+                    block_on(tnet.create()).expect("failed creating tnet");
+                    tnet.write_attribute(self);
+                }
             };
             group_setup.write_attribute(self);
             self.ssh_keygen().expect("ssh key generation failed");
@@ -1476,27 +1509,40 @@ pub trait HasPublicApiUrl: HasTestEnv + Send + Sync {
 
     /// Waits until the is_healthy() returns true
     fn await_status_is_healthy(&self) -> Result<()> {
-        retry(
+        retry_with_msg!(
+            &format!("await_status_is_healthy of {}", self.get_public_url()),
             self.test_env().logger(),
             READY_WAIT_TIMEOUT,
             RETRY_BACKOFF,
             || {
                 self.status_is_healthy()
                     .and_then(|s| if !s { bail!("Not ready!") } else { Ok(()) })
-            },
+            }
         )
     }
 
-    /// Waits until the is_healthy() returns an error
+    /// Waits until the is_healthy() returns an error three times in a row
     fn await_status_is_unavailable(&self) -> Result<()> {
-        retry(
+        let mut count = 0;
+        retry_with_msg!(
+            &format!("await_status_is_unavailable of {}", self.get_public_url()),
             self.test_env().logger(),
             READY_WAIT_TIMEOUT,
             RETRY_BACKOFF,
             || match self.status_is_healthy() {
-                Err(_) => Ok(()),
-                Ok(_) => Err(anyhow!("Status is still available")),
-            },
+                Err(_) => {
+                    count += 1;
+                    if count >= 3 {
+                        Ok(())
+                    } else {
+                        Err(anyhow!("Status was unavailable {count} times in a row."))
+                    }
+                }
+                Ok(_) => {
+                    count = 0;
+                    Err(anyhow!("Status is still available"))
+                }
+            }
         )
     }
 
@@ -1862,32 +1908,45 @@ pub trait VmControl {
     fn start(&self);
 }
 
-pub struct FarmHostedVm {
+pub struct HostedVm {
     farm: Farm,
     group_name: String,
     vm_name: String,
+    k8s: bool,
 }
 
 /// VmControl enables a user to interact with VMs, i.e. change their state.
 /// All functions belonging to this trait crash if a respective operation is for any reason
 /// unsuccessful.
-impl VmControl for FarmHostedVm {
+impl VmControl for HostedVm {
     fn kill(&self) {
-        self.farm
-            .destroy_vm(&self.group_name, &self.vm_name)
-            .expect("could not kill VM")
+        if self.k8s {
+            block_on(delete_vm(&self.vm_name)).expect("could not kill VM");
+        } else {
+            self.farm
+                .destroy_vm(&self.group_name, &self.vm_name)
+                .expect("could not kill VM");
+        }
     }
 
     fn reboot(&self) {
-        self.farm
-            .reboot_vm(&self.group_name, &self.vm_name)
-            .expect("could not reboot VM")
+        if self.k8s {
+            block_on(restart_vm(&self.vm_name)).expect("could not reboot VM");
+        } else {
+            self.farm
+                .reboot_vm(&self.group_name, &self.vm_name)
+                .expect("could not reboot VM");
+        }
     }
 
     fn start(&self) {
-        self.farm
-            .start_vm(&self.group_name, &self.vm_name)
-            .expect("could not start VM")
+        if self.k8s {
+            block_on(start_vm(&self.vm_name)).expect("could not start VM");
+        } else {
+            self.farm
+                .start_vm(&self.group_name, &self.vm_name)
+                .expect("could not start VM");
+        }
     }
 }
 
@@ -1906,10 +1965,26 @@ where
         let pot_setup = GroupSetup::read_attribute(&env);
         let farm_base_url = env.get_farm_url().unwrap();
         let farm = Farm::new(farm_base_url, env.logger());
-        Box::new(FarmHostedVm {
+
+        let mut vm_name = self.vm_name();
+        let mut k8s = false;
+        if InfraProvider::read_attribute(&env) == InfraProvider::K8s {
+            k8s = true;
+            let tnet = TNet::read_attribute(&env);
+            let tnet_node = tnet
+                .nodes
+                .iter()
+                .find(|n| n.node_id.clone().expect("node_id missing") == vm_name.clone())
+                .expect("tnet doesn't have this node")
+                .clone();
+            vm_name = tnet_node.name.expect("nameless node");
+        }
+
+        Box::new(HostedVm {
             farm,
             group_name: pot_setup.infra_group_name,
-            vm_name: self.vm_name(),
+            vm_name,
+            k8s,
         })
     }
 }
@@ -1935,37 +2010,71 @@ impl SshSession for IcNodeSnapshot {
     }
 
     fn block_on_ssh_session(&self) -> Result<Session> {
-        retry(self.env.logger(), SSH_RETRY_TIMEOUT, RETRY_BACKOFF, || {
-            self.get_ssh_session()
-        })
+        let node_record = self.raw_node_record();
+        let connection_endpoint = node_record.http.unwrap();
+        let ip_addr = IpAddr::from_str(&connection_endpoint.ip_addr)?;
+        retry_with_msg!(
+            format!("get_ssh_session to {}", ip_addr.to_string()),
+            self.env.logger(),
+            SSH_RETRY_TIMEOUT,
+            RETRY_BACKOFF,
+            || { self.get_ssh_session() }
+        )
     }
 }
 
 /* ### Auxiliary functions & helpers ### */
+#[macro_export]
+macro_rules! retry_with_msg {
+    ($msg:expr, $log:expr, $timeout:expr, $backoff:expr, $f:expr) => {
+        retry(
+            format!("{} [{}:{}]", $msg, file!(), line!()),
+            $log,
+            $timeout,
+            $backoff,
+            $f,
+        )
+    };
+}
 
-pub fn retry<F, R>(log: slog::Logger, timeout: Duration, backoff: Duration, mut f: F) -> Result<R>
+pub fn retry<S: AsRef<str>, F, R>(
+    msg: S,
+    log: slog::Logger,
+    timeout: Duration,
+    backoff: Duration,
+    mut f: F,
+) -> Result<R>
 where
     F: FnMut() -> Result<R>,
 {
+    let msg = msg.as_ref();
     let mut attempt = 1;
     let start = Instant::now();
-    info!(
+    debug!(
         log,
-        "Retrying for a maximum of {:?} with a linear backoff of {:?}", timeout, backoff
+        "Func=\"{msg}\" is being retried for the maximum of {timeout:?} with a linear backoff of {backoff:?}"
     );
     loop {
         match f() {
-            Ok(v) => break Ok(v),
-            Err(e) => {
-                if start.elapsed() > timeout {
-                    let err_msg = e.to_string();
-                    break Err(e.context(format!("Timed out! Last error: {}", err_msg)));
-                }
-                info!(
+            Ok(v) => {
+                debug!(
                     log,
-                    "Attempt {} failed. Error: {}",
-                    attempt,
-                    trunc_error(e.to_string())
+                    "Func=\"{msg}\" succeeded after {:?} on attempt {attempt}",
+                    start.elapsed()
+                );
+                break Ok(v);
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
+                if start.elapsed() > timeout {
+                    break Err(err.context(format!(
+                        "Func=\"{msg}\" timed out after {:?} on attempt {attempt}. Last error: {err_msg}", start.elapsed()
+                    )));
+                }
+                debug!(
+                    log,
+                    "Func=\"{msg}\" failed on attempt {attempt}. Error: {}",
+                    trunc_error(err_msg)
                 );
                 std::thread::sleep(backoff);
                 attempt += 1;
@@ -1981,7 +2090,21 @@ fn trunc_error(err_str: String) -> String {
     short_e
 }
 
-pub async fn retry_async<F, Fut, R>(
+#[macro_export]
+macro_rules! retry_with_msg_async {
+    ($msg:expr, $log:expr, $timeout:expr, $backoff:expr, $f:expr) => {
+        retry_async(
+            format!("{} [{}:{}]", $msg, file!(), line!()),
+            $log,
+            $timeout,
+            $backoff,
+            $f,
+        )
+    };
+}
+
+pub async fn retry_async<S: AsRef<str>, F, Fut, R>(
+    msg: S,
     log: &slog::Logger,
     timeout: Duration,
     backoff: Duration,
@@ -1991,21 +2114,36 @@ where
     Fut: Future<Output = Result<R>>,
     F: Fn() -> Fut,
 {
+    let msg = msg.as_ref();
     let mut attempt = 1;
     let start = Instant::now();
-    info!(
+    debug!(
         log,
-        "Retrying for a maximum of {:?} with a linear backoff of {:?}", timeout, backoff
+        "Func=\"{msg}\" is being retried for the maximum of {timeout:?} with a linear backoff of {backoff:?}"
     );
     loop {
         match f().await {
-            Ok(v) => break Ok(v),
-            Err(e) => {
+            Ok(v) => {
+                debug!(
+                    log,
+                    "Func=\"{msg}\" succeeded after {:?} on attempt {attempt}",
+                    start.elapsed()
+                );
+                break Ok(v);
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
                 if start.elapsed() > timeout {
-                    let err_msg = e.to_string();
-                    break Err(e.context(format!("Timed out! Last error: {}", err_msg)));
+                    break Err(err.context(format!(
+                        "Func=\"{msg}\" timed out after {:?} on attempt {attempt}. Last error: {err_msg}",
+                        start.elapsed(),
+                    )));
                 }
-                info!(log, "Attempt {} failed. Error: {:?}", attempt, e);
+                debug!(
+                    log,
+                    "Func=\"{msg}\" failed on attempt {attempt}. Error: {}",
+                    trunc_error(err_msg)
+                );
                 tokio::time::sleep(backoff).await;
                 attempt += 1;
             }

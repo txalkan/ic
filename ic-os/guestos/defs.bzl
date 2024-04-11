@@ -12,24 +12,22 @@ def image_deps(mode, malicious = False):
     Define all GuestOS inputs.
 
     Args:
-      mode: Variant to be built, dev, dev-sev or prod.
+      mode: Variant to be built, dev or prod.
       malicious: if True, bundle the `malicious_replica`
     Returns:
       A dict containing inputs to build this image.
     """
 
     deps = {
-        # Define rootfs and bootfs
-        "bootfs": {
-            # base layer
-            ":rootfs-tree.tar": "/",
-        },
-        "rootfs": {
-            # base layer
-            ":rootfs-tree.tar": "/",
+        "base_dockerfile": "//ic-os/guestos/rootfs:Dockerfile.base",
 
+        # Extra files to be added to rootfs and bootfs
+        "bootfs": {},
+        "rootfs": {
             # additional files to install
             "//publish/binaries:canister_sandbox": "/opt/ic/bin/canister_sandbox:0755",
+            "//publish/binaries:compiler_sandbox": "/opt/ic/bin/compiler_sandbox:0755",
+            "//publish/binaries:fstrim_tool": "/opt/ic/bin/fstrim_tool:0755",
             "//publish/binaries:guestos_tool": "/opt/ic/bin/guestos_tool:0755",
             "//publish/binaries:ic-btc-adapter": "/opt/ic/bin/ic-btc-adapter:0755",
             "//publish/binaries:ic-consensus-pool-util": "/opt/ic/bin/ic-consensus-pool-util:0755",
@@ -38,7 +36,7 @@ def image_deps(mode, malicious = False):
             "//publish/binaries:ic-regedit": "/opt/ic/bin/ic-regedit:0755",
             "//publish/binaries:ic-recovery": "/opt/ic/bin/ic-recovery:0755",
             "//publish/binaries:orchestrator": "/opt/ic/bin/orchestrator:0755",
-            "//publish/binaries:ic-boundary": "/opt/ic/bin/ic-boundary:0755",
+            "//publish/binaries:ic-boundary-tls": "/opt/ic/bin/ic-boundary:0755",
             ("//publish/malicious:replica" if malicious else "//publish/binaries:replica"): "/opt/ic/bin/replica:0755",  # Install the malicious replica if set
             "//publish/binaries:metrics-proxy": "/opt/ic/bin/metrics-proxy:0755",
             "//publish/binaries:sandbox_launcher": "/opt/ic/bin/sandbox_launcher:0755",
@@ -52,21 +50,21 @@ def image_deps(mode, malicious = False):
         },
 
         # Set various configuration values
-        "container_context_files": Label("//ic-os/guestos:rootfs-files"),
+        "container_context_files": Label("//ic-os/guestos/rootfs:rootfs-files"),
         "partition_table": Label("//ic-os/guestos:partitions.csv"),
         "expanded_size": "50G",
         "rootfs_size": "3G",
         "bootfs_size": "1G",
 
         # Add any custom partitions to the manifest
-        "custom_partitions": lambda: [Label("//ic-os/guestos:partition-config.tar")],
+        "custom_partitions": lambda: [Label("//ic-os/guestos:partition-config.tzst")],
 
         # We will install extra_boot_args onto the system, after substituting the
         # hash of the root filesystem into it. Track the template (before
         # substitution) as a dependency so that changes to the template file are
         # reflected in the overall version hash (the root_hash must include the
         # version hash, it cannot be the other way around).
-        "boot_args_template": Label("//ic-os/guestos:rootfs/extra_boot_args.template"),
+        "boot_args_template": Label("//ic-os/guestos/rootfs:extra_boot_args.template"),
     }
 
     # Add extra files depending on image variant
@@ -74,11 +72,16 @@ def image_deps(mode, malicious = False):
         "dev": {
             "build_container_filesystem_config_file": "//ic-os/guestos/envs/dev:build_container_filesystem_config.txt",
         },
+        "local-base-dev": {
+            # Use the non-local-base file
+            "build_container_filesystem_config_file": "//ic-os/guestos/envs/dev:build_container_filesystem_config.txt",
+        },
         "dev-malicious": {
             "build_container_filesystem_config_file": "//ic-os/guestos/envs/dev-malicious:build_container_filesystem_config.txt",
         },
-        "dev-sev": {
-            "build_container_filesystem_config_file": "//ic-os/guestos/envs/dev-sev:build_container_filesystem_config.txt",
+        "local-base-prod": {
+            # Use the non-local-base file
+            "build_container_filesystem_config_file": "//ic-os/guestos/envs/prod:build_container_filesystem_config.txt",
         },
         "prod": {
             "build_container_filesystem_config_file": "//ic-os/guestos/envs/prod:build_container_filesystem_config.txt",
@@ -90,10 +93,10 @@ def image_deps(mode, malicious = False):
     # Add extra files depending on image variant
     extra_rootfs_deps = {
         "dev": {
-            "//ic-os/guestos:rootfs/allow_console_root": "/etc/allow_console_root:0644",
+            "//ic-os/guestos/rootfs:allow_console_root": "/etc/allow_console_root:0644",
         },
-        "dev-sev": {
-            "//ic-os/guestos:rootfs/allow_console_root": "/etc/allow_console_root:0644",
+        "local-base-dev": {
+            "//ic-os/guestos/rootfs:allow_console_root": "/etc/allow_console_root:0644",
         },
     }
 

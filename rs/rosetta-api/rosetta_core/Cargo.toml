@@ -11,18 +11,22 @@ documentation.workspace = true
 
 [dependencies]
 ecdsa-secp256k1 = { path = "../../crypto/internal/crypto_lib/basic_sig/ecdsa_secp256k1", package = "ic-crypto-internal-basic-sig-ecdsa-secp256k1" }
-hex = "0.4.2"
+hex = { workspace = true }
 rand = "0.8"
 serde = { workspace = true }
 serde_cbor = { workspace = true }
 serde_derive = "1.0"
 serde_json = { workspace = true }
 serde_with = { workspace = true }
-ic-canister-client = { path = "../../canister_client" }
-ic-canister-client-sender = { path = "../../canister_client/sender" }
 ic-types = { path = "../../types/types" }
 ic-crypto-ecdsa-secp256k1 = { path = "../../crypto/ecdsa_secp256k1" }
 icrc-ledger-types = { path = "../../../packages/icrc-ledger-types" }
 candid = { workspace = true }
-anyhow = { version = "1.0", default-features = false }
+anyhow = { workspace = true }
 serde_bytes = { workspace = true }
+ic-agent = { workspace = true }
+num-bigint = "0.4.4"
+ic-crypto-ed25519 = { path = "../../crypto/ed25519"}
+
+[dev-dependencies]
+proptest = "1.0"

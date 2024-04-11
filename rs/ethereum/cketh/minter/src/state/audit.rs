@@ -1,13 +1,13 @@
 pub use super::event::{Event, EventType};
 use super::State;
-use crate::state::transactions::Reimbursed;
+use crate::state::transactions::{Reimbursed, ReimbursementIndex};
 use crate::storage::{record_event, with_event_iter};
 
 /// Updates the state to reflect the given state transition.
 // public because it's used in tests since process_event
 // requires canister infrastructure to retrieve time
 pub fn apply_state_transition(state: &mut State, payload: &EventType) {
-    match &payload {
+    match payload {
         EventType::Init(init_arg) => {
             panic!("state re-initialization is not allowed: {init_arg:?}");
         }
@@ -17,7 +17,10 @@ pub fn apply_state_transition(state: &mut State, payload: &EventType) {
                 .expect("applying upgrade event should succeed");
         }
         EventType::AcceptedDeposit(eth_event) => {
-            state.record_event_to_mint(eth_event);
+            state.record_event_to_mint(&eth_event.clone().into());
+        }
+        EventType::AcceptedErc20Deposit(erc20_event) => {
+            state.record_event_to_mint(&erc20_event.clone().into());
         }
         EventType::InvalidDeposit {
             event_source,
@@ -29,10 +32,26 @@ pub fn apply_state_transition(state: &mut State, payload: &EventType) {
             event_source,
             mint_block_index,
         } => {
-            state.record_successful_mint(*event_source, *mint_block_index);
+            state.record_successful_mint(*event_source, "ckETH", *mint_block_index, None);
+        }
+        EventType::MintedCkErc20 {
+            event_source,
+            mint_block_index,
+            ckerc20_token_symbol,
+            erc20_contract_address,
+        } => {
+            state.record_successful_mint(
+                *event_source,
+                ckerc20_token_symbol,
+                *mint_block_index,
+                Some(*erc20_contract_address),
+            );
         }
         EventType::SyncedToBlock { block_number } => {
             state.last_scraped_block_number = *block_number;
+        }
+        EventType::SyncedErc20ToBlock { block_number } => {
+            state.last_erc20_scraped_block_number = *block_number;
         }
         EventType::AcceptedEthWithdrawalRequest(request) => {
             state
@@ -70,17 +89,48 @@ pub fn apply_state_transition(state: &mut State, payload: &EventType) {
             state.record_finalized_transaction(withdrawal_id, transaction_receipt);
         }
         EventType::ReimbursedEthWithdrawal(Reimbursed {
-            withdrawal_id,
+            burn_in_block: withdrawal_id,
             reimbursed_in_block,
             reimbursed_amount: _,
             transaction_hash: _,
         }) => {
-            state
-                .eth_transactions
-                .record_finalized_reimbursement(*withdrawal_id, *reimbursed_in_block);
+            state.eth_transactions.record_finalized_reimbursement(
+                ReimbursementIndex::CkEth {
+                    ledger_burn_index: *withdrawal_id,
+                },
+                *reimbursed_in_block,
+            );
         }
         EventType::SkippedBlock(block_number) => {
             state.record_skipped_block(*block_number);
+        }
+        EventType::AddedCkErc20Token(ckerc20_token) => {
+            state.record_add_ckerc20_token(ckerc20_token.clone());
+        }
+        EventType::AcceptedErc20WithdrawalRequest(request) => {
+            state.record_erc20_withdrawal_request(request.clone())
+        }
+        EventType::ReimbursedErc20Withdrawal {
+            cketh_ledger_burn_index,
+            ckerc20_ledger_id,
+            reimbursed,
+        } => {
+            state.eth_transactions.record_finalized_reimbursement(
+                ReimbursementIndex::CkErc20 {
+                    cketh_ledger_burn_index: *cketh_ledger_burn_index,
+                    ledger_id: *ckerc20_ledger_id,
+                    ckerc20_ledger_burn_index: reimbursed.burn_in_block,
+                },
+                reimbursed.reimbursed_in_block,
+            );
+        }
+        EventType::FailedErc20WithdrawalRequest(cketh_reimbursement_request) => {
+            state.eth_transactions.record_reimbursement_request(
+                ReimbursementIndex::CkEth {
+                    ledger_burn_index: cketh_reimbursement_request.ledger_burn_index,
+                },
+                cketh_reimbursement_request.clone(),
+            )
         }
     }
 }

@@ -503,7 +503,7 @@ pub struct Proposal {
     #[prost(string, tag = "1")]
     pub title: ::prost::alloc::string::String,
     /// The description of the proposal which is a short text, composed
-    /// using a maximum of 15000 bytes of characters.
+    /// using a maximum of 30000 bytes of characters.
     #[prost(string, tag = "2")]
     pub summary: ::prost::alloc::string::String,
     /// The web address of additional content required to evaluate the
@@ -700,6 +700,18 @@ pub mod governance_error {
         InvalidProposal = 15,
         /// The NeuronId is invalid.
         InvalidNeuronId = 16,
+        /// This indicates that we have a bug. It should be impossible for users to provoke this.
+        ///
+        /// For example, supposed you put some auxiliary data into a ProposalData during proposal
+        /// submission. That data is supposed to be used during execution of the proposal. But during
+        /// execution, the auxiliary data is invalid (e.g. absent).
+        InconsistentInternalData = 17,
+        /// Users cannot provoke this.
+        ///
+        /// E.g. 1 / E8 somehow provokes a divide by zero error, even though E8 is a positive number.
+        ///
+        /// This is a generalization of INCONSISTENT_INTERNAL_DATA.
+        UnreachableCode = 18,
     }
     impl ErrorType {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -725,6 +737,8 @@ pub mod governance_error {
                 ErrorType::InvalidPrincipal => "ERROR_TYPE_INVALID_PRINCIPAL",
                 ErrorType::InvalidProposal => "ERROR_TYPE_INVALID_PROPOSAL",
                 ErrorType::InvalidNeuronId => "ERROR_TYPE_INVALID_NEURON_ID",
+                ErrorType::InconsistentInternalData => "ERROR_TYPE_INCONSISTENT_INTERNAL_DATA",
+                ErrorType::UnreachableCode => "ERROR_TYPE_UNREACHABLE_CODE",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -747,6 +761,8 @@ pub mod governance_error {
                 "ERROR_TYPE_INVALID_PRINCIPAL" => Some(Self::InvalidPrincipal),
                 "ERROR_TYPE_INVALID_PROPOSAL" => Some(Self::InvalidProposal),
                 "ERROR_TYPE_INVALID_NEURON_ID" => Some(Self::InvalidNeuronId),
+                "ERROR_TYPE_INCONSISTENT_INTERNAL_DATA" => Some(Self::InconsistentInternalData),
+                "ERROR_TYPE_UNREACHABLE_CODE" => Some(Self::UnreachableCode),
                 _ => None,
             }
         }
@@ -903,8 +919,6 @@ pub struct ProposalData {
     /// no reward event taking this proposal into consideration happened yet.
     ///
     /// This field matches field round in RewardEvent.
-    ///
-    /// This field is invalid when .is_eligible_for_rewards is false.
     #[prost(uint64, tag = "13")]
     pub reward_event_round: u64,
     /// The proposal's wait-for-quiet state. This needs to be saved in stable memory.
@@ -921,14 +935,13 @@ pub struct ProposalData {
     /// GenericNervousSystemFunction validator_canister.
     #[prost(string, optional, tag = "15")]
     pub payload_text_rendering: ::core::option::Option<::prost::alloc::string::String>,
-    /// False if both (initial|final)_reward_rate_basis_points are zero when the
-    /// proposal was made.
-    /// This field is not very useful and will be removed in the future. The plan
-    /// is to treat all proposals as eligible for rewards, and not distribute
-    /// anything if the reward rate is zero.
-    /// The original purpose of this field is to make sure that proposals that are
-    /// not eligible for rewards are not be blocked from garbage collection,
-    /// which normally only happens after rewards are distributed.
+    /// Deprecated. From now on, this field will be set to true when new proposals
+    /// are created. However, there ARE old proposals where this is set to false.
+    ///
+    /// When set to false, the proposal skips past the ReadyToSettle reward status
+    /// directly to Settled
+    ///
+    /// TODO(NNS1-2731): Delete this.
     #[prost(bool, tag = "16")]
     pub is_eligible_for_rewards: bool,
     /// The initial voting period of the proposal, identical in meaning to the one in
@@ -959,6 +972,107 @@ pub struct ProposalData {
     #[prost(message, optional, tag = "21")]
     pub minimum_yes_proportion_of_exercised:
         ::core::option::Option<::ic_nervous_system_proto::pb::v1::Percentage>,
+    /// In general, this holds data retrieved at proposal submission/creation time and used later
+    /// during execution. This varies based on the action of the proposal.
+    #[prost(oneof = "proposal_data::ActionAuxiliary", tags = "22, 23")]
+    pub action_auxiliary: ::core::option::Option<proposal_data::ActionAuxiliary>,
+}
+/// Nested message and enum types in `ProposalData`.
+pub mod proposal_data {
+    #[derive(candid::CandidType, candid::Deserialize, comparable::Comparable)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct TransferSnsTreasuryFundsActionAuxiliary {
+        #[prost(message, optional, tag = "1")]
+        pub valuation: ::core::option::Option<super::Valuation>,
+    }
+    #[derive(candid::CandidType, candid::Deserialize, comparable::Comparable)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct MintSnsTokensActionAuxiliary {
+        #[prost(message, optional, tag = "1")]
+        pub valuation: ::core::option::Option<super::Valuation>,
+    }
+    /// In general, this holds data retrieved at proposal submission/creation time and used later
+    /// during execution. This varies based on the action of the proposal.
+    #[derive(candid::CandidType, candid::Deserialize, comparable::Comparable)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum ActionAuxiliary {
+        #[prost(message, tag = "22")]
+        TransferSnsTreasuryFunds(TransferSnsTreasuryFundsActionAuxiliary),
+        #[prost(message, tag = "23")]
+        MintSnsTokens(MintSnsTokensActionAuxiliary),
+    }
+}
+#[derive(candid::CandidType, candid::Deserialize, comparable::Comparable)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Valuation {
+    #[prost(enumeration = "valuation::Token", optional, tag = "1")]
+    pub token: ::core::option::Option<i32>,
+    #[prost(message, optional, tag = "2")]
+    pub account: ::core::option::Option<Account>,
+    #[prost(uint64, optional, tag = "3")]
+    pub timestamp_seconds: ::core::option::Option<u64>,
+    #[prost(message, optional, tag = "4")]
+    pub valuation_factors: ::core::option::Option<valuation::ValuationFactors>,
+}
+/// Nested message and enum types in `Valuation`.
+pub mod valuation {
+    #[derive(candid::CandidType, candid::Deserialize, comparable::Comparable)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct ValuationFactors {
+        #[prost(message, optional, tag = "1")]
+        pub tokens: ::core::option::Option<::ic_nervous_system_proto::pb::v1::Tokens>,
+        #[prost(message, optional, tag = "2")]
+        pub icps_per_token: ::core::option::Option<::ic_nervous_system_proto::pb::v1::Decimal>,
+        #[prost(message, optional, tag = "3")]
+        pub xdrs_per_icp: ::core::option::Option<::ic_nervous_system_proto::pb::v1::Decimal>,
+    }
+    #[derive(
+        candid::CandidType,
+        candid::Deserialize,
+        comparable::Comparable,
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration,
+    )]
+    #[repr(i32)]
+    pub enum Token {
+        Unspecified = 0,
+        Icp = 1,
+        SnsToken = 2,
+    }
+    impl Token {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Token::Unspecified => "TOKEN_UNSPECIFIED",
+                Token::Icp => "TOKEN_ICP",
+                Token::SnsToken => "TOKEN_SNS_TOKEN",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "TOKEN_UNSPECIFIED" => Some(Self::Unspecified),
+                "TOKEN_ICP" => Some(Self::Icp),
+                "TOKEN_SNS_TOKEN" => Some(Self::SnsToken),
+                _ => None,
+            }
+        }
+    }
 }
 /// The nervous system's parameters, which are parameters that can be changed, via proposals,
 /// by each nervous system community.
@@ -1169,6 +1283,13 @@ pub struct NeuronPermissionList {
 }
 /// A record of when voting rewards were determined, and neuron maturity
 /// increased for participation in voting on proposals.
+///
+/// This has diverged from NNS: this uses the same tag for different fields.
+/// Therefore, we cannot simply move one of the definitions to a shared library.
+///
+/// To make it a little easier to eventually deduplicate NNS and SNS governance
+/// code, tags should be chosen so that it is new to BOTH this and the NNS
+/// RewardEvent. (This also applies to other message definitions.)
 #[derive(candid::CandidType, candid::Deserialize, comparable::Comparable)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1227,7 +1348,7 @@ pub struct RewardEvent {
     /// rounds have passed since the last time rewards were distributed (rather
     /// than being rolled over).
     ///
-    /// For the genesis reward event, this field will be zero.
+    /// For the genesis pseudo-reward event, this field will be zero.
     ///
     /// In normal operation, this field will almost always be 1. There are two
     /// reasons that rewards might not be distributed in a given round.
@@ -1242,6 +1363,18 @@ pub struct RewardEvent {
     /// In both of these cases, the rewards purse rolls over into the next round.
     #[prost(uint64, optional, tag = "6")]
     pub rounds_since_last_distribution: ::core::option::Option<u64>,
+    /// The total amount of rewards that was available during the reward event.
+    ///
+    /// The e8s_equivalent_to_be_rolled_over method returns this when
+    /// there are no proposals (per the settled_proposals field).
+    ///
+    /// This is mostly copied from NNS.
+    ///
+    /// Warning: There is a field with the same name in NNS, but different tags are
+    /// used. Also, this uses the `optional` keyword (whereas, the NNS analog does
+    /// not).
+    #[prost(uint64, optional, tag = "8")]
+    pub total_available_e8s_equivalent: ::core::option::Option<u64>,
 }
 /// The representation of the whole governance system, containing all
 /// information about the governance system that must be kept
@@ -2275,6 +2408,9 @@ pub struct ListProposalsResponse {
     /// The returned list of proposals' ProposalData.
     #[prost(message, repeated, tag = "1")]
     pub proposals: ::prost::alloc::vec::Vec<ProposalData>,
+    /// Whether ballots cast by the caller are included in the returned proposals.
+    #[prost(bool, optional, tag = "2")]
+    pub include_ballots_by_caller: ::core::option::Option<bool>,
 }
 /// An operation that lists all neurons tracked in the Governance state in a
 /// paginated fashion.

@@ -1,33 +1,42 @@
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
 DEPENDENCIES = [
     "@crate_index//:anyhow",
+    "@crate_index//:arc-swap",
     "@crate_index//:axum",
+    "@crate_index//:axum_server_0_6_0",
     "@crate_index//:bytes",
     "@crate_index//:candid",
-    "@crate_index//:clap_4_0_0",
+    "@crate_index//:clap",
     "@crate_index//:form_urlencoded",
     "@crate_index//:futures",
-    "@crate_index//:http",
-    "@crate_index//:http-body",
+    "@crate_index//:http_1_0_0",
+    "@crate_index//:http_body_1_0_0",
+    "@crate_index//:http-body-util",
     "@crate_index//:hyper",
-    "@crate_index//:hyper-rustls",
-    "@crate_index//:hyperlocal",
+    "@crate_index//:hyper_rustls_0_26_0",
+    "@crate_index//:hyper-util",
+    "@crate_index//:hyperlocal-next",
     "@crate_index//:itertools",
     "@crate_index//:ic-agent",
     "@crate_index//:ic-utils",
     "@crate_index//:jemallocator",
+    "@crate_index//:maxminddb",
     "@crate_index//:opentelemetry",
     "@crate_index//:opentelemetry-prometheus",
     "@crate_index//:prometheus",
-    "@crate_index//:rustls",
+    "@crate_index//:regex",
+    "@crate_index//:reqwest",
+    "@crate_index//:rustls_0_22_2",
     "@crate_index//:rustls-native-certs",
     "@crate_index//:rustls-pemfile",
+    "@crate_index//:serde",
+    "@crate_index//:serde_json",
     "@crate_index//:tokio-util",
     "@crate_index//:tower",
-    "@crate_index//:tower-http",
+    "@crate_index//:tower_http_0_5_1",
     "@crate_index//:tracing",
     "@crate_index//:tracing-subscriber",
     "@crate_index//:tokio",
@@ -42,6 +51,7 @@ MACRO_DEPENDENCIES = [
 ]
 
 DEV_DEPENDENCIES = [
+    "@crate_index//:httptest",
     "@crate_index//:tokio-test",
 ]
 
@@ -54,7 +64,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     aliases = ALIASES,
     proc_macro_deps = MACRO_DEPENDENCIES,
-    deps = DEPENDENCIES,
+    deps = DEPENDENCIES + [":icx_proxy"],
 )
 
 rust_binary(
@@ -63,13 +73,37 @@ rust_binary(
     aliases = ALIASES,
     crate_features = ["dev_proxy"],
     proc_macro_deps = MACRO_DEPENDENCIES,
-    deps = DEPENDENCIES,
+    deps = DEPENDENCIES + [":icx_proxy_dev"],
 )
 
 rust_test(
     name = "icx_proxy_test",
     aliases = ALIASES,
     crate = ":icx-proxy",
+    proc_macro_deps = MACRO_DEPENDENCIES + MACRO_DEV_DEPENDENCIES,
+    deps = DEPENDENCIES + DEV_DEPENDENCIES,
+)
+
+rust_library(
+    name = "icx_proxy",
+    srcs = glob(
+        ["src/**"],
+        exclude = ["src/main.rs"],
+    ),
+    aliases = ALIASES,
+    proc_macro_deps = MACRO_DEPENDENCIES + MACRO_DEV_DEPENDENCIES,
+    deps = DEPENDENCIES + DEV_DEPENDENCIES,
+)
+
+rust_library(
+    name = "icx_proxy_dev",
+    srcs = glob(
+        ["src/**"],
+        exclude = ["src/main.rs"],
+    ),
+    aliases = ALIASES,
+    crate_features = ["dev_proxy"],
+    crate_name = "icx_proxy",
     proc_macro_deps = MACRO_DEPENDENCIES + MACRO_DEV_DEPENDENCIES,
     deps = DEPENDENCIES + DEV_DEPENDENCIES,
 )

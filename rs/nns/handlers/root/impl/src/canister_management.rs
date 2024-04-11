@@ -1,7 +1,7 @@
 use crate::PROXIED_CANISTER_CALLS_TRACKER;
 use dfn_core::api::{call, call_bytes, call_with_funds, caller, print, CanisterId, Funds};
 use ic_base_types::PrincipalId;
-use ic_ic00_types::{CanisterInstallMode::Install, InstallCodeArgs};
+use ic_management_canister_types::{CanisterInstallMode::Install, InstallCodeArgs};
 use ic_nervous_system_clients::{
     canister_id_record::CanisterIdRecord,
     management_canister_client::ManagementCanisterClient,
@@ -136,7 +136,6 @@ async fn try_to_create_and_install_canister(
         arg: request.arg,
         compute_allocation: request.compute_allocation,
         memory_allocation: request.memory_allocation,
-        query_allocation: request.query_allocation,
         sender_canister_version: Some(dfn_core::api::canister_version()),
     };
     let install_res: Result<(), (Option<i32>, String)> = call(

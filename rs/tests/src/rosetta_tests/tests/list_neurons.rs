@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const PORT: u32 = 8107;
-const VM_NAME: &str = "rosetta-test-neuron-info";
+const VM_NAME: &str = "rosetta-neuron-info";
 
 pub fn test(env: TestEnv) {
     let _logger = env.logger();
@@ -34,7 +34,7 @@ pub fn test(env: TestEnv) {
     // A user can only fetch the list of their own neurons. This is why the principals of the caller and the neuron controller have to match.
     let identity = get_identity();
     let principal = identity.sender().unwrap();
-    let keypair = EdKeypair::from_pem(IDENTITY_PEM).unwrap();
+    let keypair = EdKeypair::deserialize_pkcs8_pem(IDENTITY_PEM).unwrap();
 
     let mut neurons = TestNeurons::new(2000, &mut ledger_balances);
     let neuron_setup = |neuron: &mut Neuron| {
@@ -92,7 +92,7 @@ async fn test_list_neurons(
                 .first()
                 .expect("Expected one list neuron operation."),
             ic_rosetta_api::models::Operation {
-                _type: _expected_type,
+                type_: _expected_type,
                 ..
             }
         ));

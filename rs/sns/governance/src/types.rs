@@ -36,8 +36,8 @@ use async_trait::async_trait;
 use ic_base_types::{CanisterId, PrincipalId};
 use ic_canister_log::log;
 use ic_crypto_sha2::Sha256;
-use ic_ic00_types::CanisterInstallModeError;
 use ic_ledger_core::tokens::{Tokens, TOKEN_SUBDIVIDABLE_BY};
+use ic_management_canister_types::CanisterInstallModeError;
 use ic_nervous_system_common::{validate_proposal_url, NervousSystemError, SECONDS_PER_DAY};
 use ic_nervous_system_proto::pb::v1::{Duration as PbDuration, Percentage};
 use ic_sns_governance_proposal_criticality::{
@@ -303,6 +303,17 @@ impl From<&manage_neuron::Command> for neuron_in_flight_command::Command {
             S::RemoveNeuronPermissions(x) => D::RemoveNeuronPermissions(x),
             S::StakeMaturity          (_) => D::SyncCommand(SyncCommand{}),
         }
+    }
+}
+
+lazy_static! {
+    static ref DEFAULT_NERVOUS_SYSTEM_PARAMETERS: NervousSystemParameters =
+        NervousSystemParameters::default();
+}
+
+impl Default for &NervousSystemParameters {
+    fn default() -> Self {
+        &DEFAULT_NERVOUS_SYSTEM_PARAMETERS
     }
 }
 
@@ -1460,9 +1471,9 @@ impl Action {
         Self::iter().map(NervousSystemFunction::from).collect()
     }
 
-    // The current set of valid native function ids, for the purposes of following.
-    // See `Proposal`.
-    // See `impl From<&Action> for u64`.
+    /// The current set of valid native function ids, for the purposes of following.
+    /// See `Proposal`.
+    /// See `impl From<&Action> for u64`.
     pub fn native_function_ids() -> Vec<u64> {
         Action::native_functions()
             .into_iter()
@@ -1470,16 +1481,29 @@ impl Action {
             .collect()
     }
 
-    // Returns a clone of self, except that "large blob fields" are replaced
-    // with a (UTF-8 encoded) textual summary of their contents. See
-    // summarize_blob_field.
-    pub(crate) fn strip_large_fields(&self) -> Self {
+    /// Returns a clone of self, except that "large blob fields" are replaced
+    /// with a (UTF-8 encoded) textual summary of their contents. See
+    /// summarize_blob_field.
+    pub(crate) fn limited_for_get_proposal(&self) -> Self {
         match self {
             Action::UpgradeSnsControlledCanister(action) => {
-                Action::UpgradeSnsControlledCanister(action.strip_large_fields())
+                Action::UpgradeSnsControlledCanister(action.limited_for_get_proposal())
             }
             Action::ExecuteGenericNervousSystemFunction(action) => {
-                Action::ExecuteGenericNervousSystemFunction(action.strip_large_fields())
+                Action::ExecuteGenericNervousSystemFunction(action.limited_for_get_proposal())
+            }
+            action => action.clone(),
+        }
+    }
+
+    /// Returns a clone of self, except that "large blob fields" are cleared.
+    pub(crate) fn limited_for_list_proposals(&self) -> Self {
+        match self {
+            Action::UpgradeSnsControlledCanister(action) => {
+                Action::UpgradeSnsControlledCanister(action.limited_for_list_proposals())
+            }
+            Action::ExecuteGenericNervousSystemFunction(action) => {
+                Action::ExecuteGenericNervousSystemFunction(action.limited_for_list_proposals())
             }
             action => action.clone(),
         }
@@ -1592,29 +1616,48 @@ pub(crate) fn function_id_to_proposal_criticality(function_id: u64) -> ProposalC
 }
 
 impl UpgradeSnsControlledCanister {
-    // Returns a clone of self, except that "large blob fields" are replaced
-    // with a (UTF-8 encoded) textual summary of their contents. See
-    // summarize_blob_field.
-    pub(crate) fn strip_large_fields(&self) -> Self {
+    /// Returns a clone of self, except that "large blob fields" are replaced
+    /// with a (UTF-8 encoded) textual summary of their contents. See
+    /// summarize_blob_field.
+    pub(crate) fn limited_for_get_proposal(&self) -> Self {
         Self {
+            canister_id: self.canister_id,
             new_canister_wasm: summarize_blob_field(&self.new_canister_wasm),
             canister_upgrade_arg: self
                 .canister_upgrade_arg
                 .as_ref()
                 .map(|blob| summarize_blob_field(blob)),
-            ..self.clone()
+            mode: self.mode,
+        }
+    }
+
+    // Returns a clone of self, except that "large blob fields" are cleared.
+    pub(crate) fn limited_for_list_proposals(&self) -> Self {
+        Self {
+            canister_id: self.canister_id,
+            canister_upgrade_arg: self.canister_upgrade_arg.clone(),
+            mode: self.mode,
+            new_canister_wasm: Vec::new(),
         }
     }
 }
 
 impl ExecuteGenericNervousSystemFunction {
-    // Returns a clone of self, except that "large blob fields" are replaced
-    // with a (UTF-8 encoded) textual summary of their contents. See
-    // summarize_blob_field.
-    pub(crate) fn strip_large_fields(&self) -> Self {
+    /// Returns a clone of self, except that "large blob fields" are replaced
+    /// with a (UTF-8 encoded) textual summary of their contents. See
+    /// summarize_blob_field.
+    pub(crate) fn limited_for_get_proposal(&self) -> Self {
         Self {
+            function_id: self.function_id,
             payload: summarize_blob_field(&self.payload),
-            ..self.clone()
+        }
+    }
+
+    /// Returns a clone of self, except that "large blob fields" are cleared.
+    pub(crate) fn limited_for_list_proposals(&self) -> Self {
+        Self {
+            function_id: self.function_id,
+            payload: Vec::new(),
         }
     }
 }
@@ -1703,6 +1746,35 @@ pub fn is_registered_function_id(
     match nervous_system_functions.get(&function_id) {
         None => false,
         Some(function) => function != &*NERVOUS_SYSTEM_FUNCTION_DELETION_MARKER,
+    }
+}
+
+// This is almost a copy n' paste from NNS. The main difference (as of
+// 2023-11-17) is to account for the fact that here in SNS,
+// total_available_e8s_equivalent is optional. (Therefore, an extra
+// unwrap_or_default call is added.)
+impl RewardEvent {
+    /// Calculates the total_available_e8s_equivalent in this event that should
+    /// be "rolled over" into the next `RewardEvent`.
+    ///
+    /// Behavior:
+    /// - If rewards were distributed for this event, then no available_icp_e8s
+    ///   should be rolled over, so this function returns 0.
+    /// - Otherwise, this function returns
+    ///   `total_available_e8s_equivalent`.
+    pub(crate) fn e8s_equivalent_to_be_rolled_over(&self) -> u64 {
+        if self.rewards_rolled_over() {
+            self.total_available_e8s_equivalent.unwrap_or_default()
+        } else {
+            0
+        }
+    }
+
+    // Not copied from NNS: fn rounds_since_last_distribution_to_be_rolled_over
+
+    /// Whether this is a "rollover event", where no rewards were distributed.
+    pub(crate) fn rewards_rolled_over(&self) -> bool {
+        self.settled_proposals.is_empty()
     }
 }
 
@@ -3376,7 +3448,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_strip_large_fields() {
+    fn test_limited_for_get_proposal() {
         let motion_proposal = ProposalData {
             proposal: Some(Proposal {
                 action: Some(Action::Motion(Motion {
@@ -3387,7 +3459,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
 
-        assert_eq!(motion_proposal.strip_large_fields(), motion_proposal,);
+        assert_eq!(motion_proposal.limited_for_get_proposal(), motion_proposal,);
 
         let upgrade_sns_controlled_canister_proposal = ProposalData {
             proposal: Some(Proposal {
@@ -3403,7 +3475,7 @@ pub(crate) mod tests {
         };
 
         assert_ne!(
-            upgrade_sns_controlled_canister_proposal.strip_large_fields(),
+            upgrade_sns_controlled_canister_proposal.limited_for_get_proposal(),
             upgrade_sns_controlled_canister_proposal,
         );
 
@@ -3421,7 +3493,7 @@ pub(crate) mod tests {
         };
 
         assert_ne!(
-            execute_generic_nervous_system_function_proposal.strip_large_fields(),
+            execute_generic_nervous_system_function_proposal.limited_for_get_proposal(),
             execute_generic_nervous_system_function_proposal,
         );
     }

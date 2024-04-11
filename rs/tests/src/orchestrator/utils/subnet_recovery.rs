@@ -15,6 +15,7 @@ use crate::util::*;
 use crate::{
     driver::{test_env::TestEnv, test_env_api::*},
     orchestrator::utils::rw_message::{can_read_msg, cannot_store_msg},
+    retry_with_msg,
     util::runtime_from_url,
 };
 use anyhow::bail;
@@ -37,6 +38,7 @@ use url::Url;
 pub fn set_sandbox_env_vars(dir: PathBuf) {
     set_var_to_path("SANDBOX_BINARY", dir.join("canister_sandbox"));
     set_var_to_path("LAUNCHER_BINARY", dir.join("sandbox_launcher"));
+    set_var_to_path("COMPILER_BINARY", dir.join("compiler_sandbox"));
 }
 
 /// break a subnet by breaking the replica binary on f+1 = (subnet_size - 1) / 3 +1
@@ -93,20 +95,26 @@ pub(crate) fn halt_subnet(
         .halt_subnet(subnet_id, true, &[])
         .exec()
         .expect("Failed to halt subnet.");
-    retry(logger.clone(), secs(120), secs(10), || {
-        let res = execute_bash_command(
-            &s,
-            format!(
-                "journalctl --after-cursor='{}' | grep -c 'is halted'",
-                message.cursor
-            ),
-        );
-        if res.map_or(false, |r| r.trim().parse::<i32>().unwrap() > 0) {
-            Ok(())
-        } else {
-            bail!("Did not find log entry that consensus is halted.")
+    retry_with_msg!(
+        "check if consensus is halted",
+        logger.clone(),
+        secs(120),
+        secs(10),
+        || {
+            let res = execute_bash_command(
+                &s,
+                format!(
+                    "journalctl --after-cursor='{}' | grep -c 'is halted'",
+                    message.cursor
+                ),
+            );
+            if res.map_or(false, |r| r.trim().parse::<i32>().unwrap() > 0) {
+                Ok(())
+            } else {
+                bail!("Did not find log entry that consensus is halted.")
+            }
         }
-    })
+    )
     .expect("Failed to detect broken subnet.");
 }
 
@@ -204,7 +212,8 @@ pub(crate) fn assert_node_is_unassigned(node: &IcNodeSnapshot, logger: &Logger) 
         .block_on_ssh_session()
         .expect("Failed to establish SSH session");
 
-    retry(
+    retry_with_msg!(
+        format!("check if node {} is unassigned", node.node_id),
         logger.clone(),
         secs(300),
         secs(10),
@@ -215,7 +224,7 @@ pub(crate) fn assert_node_is_unassigned(node: &IcNodeSnapshot, logger: &Logger) 
             }
             Ok(s) => bail!("Received unexpected output: {}", s),
             Err(e) => bail!("Failed to read directory: {}", e),
-        },
+        }
     )
     .expect("Failed to detect that node has deleted its state.");
 }
@@ -398,20 +407,26 @@ pub(crate) fn disable_ecdsa_on_subnet(
 
     info!(logger, "Waiting until signing fails.");
     let message_hash = [0xabu8; 32];
-    retry(logger.clone(), secs(120), secs(2), || {
-        let sig_result = block_on(get_signature_with_logger(
-            &message_hash,
-            ECDSA_SIGNATURE_FEE,
-            make_key(KEY_ID1),
-            canister,
-            logger,
-        ));
-        if sig_result.is_ok() {
-            bail!("Signing is still possible.")
-        } else {
-            Ok(())
+    retry_with_msg!(
+        "check if signing has failed",
+        logger.clone(),
+        secs(120),
+        secs(2),
+        || {
+            let sig_result = block_on(get_signature_with_logger(
+                &message_hash,
+                ECDSA_SIGNATURE_FEE,
+                make_key(KEY_ID1),
+                canister,
+                logger,
+            ));
+            if sig_result.is_ok() {
+                bail!("Signing is still possible.")
+            } else {
+                Ok(())
+            }
         }
-    })
+    )
     .expect("Failed to detect disabled signing.");
 }
 

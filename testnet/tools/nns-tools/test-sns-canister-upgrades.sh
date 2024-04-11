@@ -10,11 +10,6 @@ Usage: $0 <VERSION> <SNS_CANISTER_TYPE> (<SNS_CANISTER_TYPE>...)
   VERSION: Version to test (generally git hash, could be build id.  Green checkmarks on gitlab commit list have assets)
   SNS_CANISTER_TYPE: Human readable SNS canister name (root, governance, ledger, swap, archive, index)
 
-
-  NOTE: Both NNS_URL and NEURON_ID must be set as environment variables.
-    Using \"source \$YOUR_WORKING_DIRECTORY/output_vars_nns_state_deployment.sh\" will give you the needed
-    variables in your shell.
-
   This script will test upgrading the canisters to a particular version, and will test doing so
     in all possible permutations of the upgrades.
   "
@@ -27,6 +22,8 @@ fi
 VERSION=$1
 shift
 CANISTERS="${@}"
+
+set_testnet_env_variables
 
 ensure_variable_set IDL2JSON
 ensure_variable_set SNS_QUILL
@@ -80,24 +77,37 @@ echo "$PERMUTATIONS" | while read -r ORDERING; do
 
     for CANISTER in $ORDERING; do
 
-        echo "Uploading ungzipped $CANISTER WASM to SNS-W" | tee -a $LOG_FILE
         WASM_GZ_FILE=$(download_sns_canister_wasm_gz_for_type "$CANISTER" "$VERSION")
 
         ORIGINAL_HASH=$(sha_256 "$WASM_GZ_FILE")
+
+        # Re-gzip the WASM to generate an equivalent, file that nevertheless has a different SHA256.
         UNZIPPED=$(ungzip "$WASM_GZ_FILE")
-        NEW_HASH=$(sha_256 "$UNZIPPED")
+        # This changes the modification time of the file, which is enough to cause re-gzipping to
+        # generate a different (but still equivalent) result.
+        touch "${UNZIPPED}"
+        # gzip explodes when the destination location is already taken. Here, we assume that in such
+        # cases, it is just seeing the result of a previous gzip run, and there is no cause for
+        # alarm. Hence the ` || true` at the end of this line.
+        gzip -S .regz "${UNZIPPED}" || true
+        REZIPPED="${UNZIPPED}".regz
+        NEW_HASH=$(sha_256 "${REZIPPED}")
+
+        # Verify that re-gzipping had the intended effect. To wit, a different hash.
         if [ "$NEW_HASH" == "$ORIGINAL_HASH" ]; then
             print_red "Hashes were the same, aborting rest of test..."
             break
         fi
+
+        echo "Uploading re-gzipped $CANISTER WASM to SNS-W" | tee -a $LOG_FILE
         upload_wasm_to_sns_wasm "$NNS_URL" "$NEURON_ID" \
-            "$PEM" "$CANISTER" "$UNZIPPED"
+            "$PEM" "$CANISTER" "${REZIPPED}"
 
         upgrade_sns "$NNS_URL" "$NEURON_ID" "$PEM" \
-            "$CANISTER" "$UNZIPPED" "$LOG_FILE" "$SWAP_CANISTER_ID" "$GOV_CANISTER_ID"
+            "$CANISTER" "${REZIPPED}" "$LOG_FILE" "$SWAP_CANISTER_ID" "$GOV_CANISTER_ID"
 
         if ! wait_for_canister_has_file_contents "$NNS_URL" \
-            $(sns_canister_id_for_sns_canister_type $CANISTER) "$UNZIPPED"; then
+            $(sns_canister_id_for_sns_canister_type $CANISTER) "${REZIPPED}"; then
             print_red "Subsequent upgrade failed."
             print_red "Failed upgrade for '$ORDERING' on step upgrading '$CANISTER'" | tee -a $LOG_FILE
             break

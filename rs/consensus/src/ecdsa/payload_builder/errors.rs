@@ -4,8 +4,8 @@ use ic_types::{
     consensus::ecdsa,
     crypto::canister_threshold_sig::{
         error::{
-            IDkgParamsValidationError, IDkgTranscriptIdError, PresignatureQuadrupleCreationError,
-            ThresholdEcdsaSigInputsCreationError,
+            EcdsaPresignatureQuadrupleCreationError, IDkgParamsValidationError,
+            IDkgTranscriptIdError, ThresholdEcdsaSigInputsCreationError,
         },
         idkg::InitialIDkgDealings,
     },
@@ -15,18 +15,19 @@ use ic_types::{
 
 use super::InvalidChainCacheError;
 
-#[derive(Clone, Debug)]
-pub enum EcdsaPayloadError {
+#[derive(Clone, Debug, PartialEq)]
+// The fields are only read by the `Debug` implementation.
+// The `dead_code` lint ignores `Debug` impls, see: https://github.com/rust-lang/rust/issues/88900.
+// #[allow(dead_code)]
+pub(crate) enum EcdsaPayloadError {
     RegistryClientError(RegistryClientError),
     MegaKeyFromRegistryError(MegaKeyFromRegistryError),
     ConsensusSummaryBlockNotFound(Height),
-    ConsensusRegistryVersionNotFound(Height),
     StateManagerError(StateManagerError),
     SubnetWithNoNodes(SubnetId, RegistryVersion),
-    PreSignatureError(PresignatureQuadrupleCreationError),
+    PreSignatureError(EcdsaPresignatureQuadrupleCreationError),
     IDkgParamsValidationError(IDkgParamsValidationError),
     IDkgTranscriptIdError(IDkgTranscriptIdError),
-    DkgSummaryBlockNotFound(Height),
     ThresholdEcdsaSigInputsCreationError(ThresholdEcdsaSigInputsCreationError),
     TranscriptLookupError(ecdsa::TranscriptLookupError),
     TranscriptCastError(ecdsa::TranscriptCastError),
@@ -52,8 +53,8 @@ impl From<StateManagerError> for EcdsaPayloadError {
     }
 }
 
-impl From<PresignatureQuadrupleCreationError> for EcdsaPayloadError {
-    fn from(err: PresignatureQuadrupleCreationError) -> Self {
+impl From<EcdsaPresignatureQuadrupleCreationError> for EcdsaPayloadError {
+    fn from(err: EcdsaPresignatureQuadrupleCreationError) -> Self {
         EcdsaPayloadError::PreSignatureError(err)
     }
 }

@@ -9,19 +9,19 @@ documentation.workspace = true
 [dependencies]
 candid = { workspace = true }
 ciborium = { workspace = true }
-hex = "0.4.2"
+hex = { workspace = true }
 ic-base-types = { path = "../../types/base_types" }
 ic-crypto-sha2 = { path = "../../crypto/sha2" }
 ic-ledger-canister-core = { path = "../ledger_canister_core" }
 ic-ledger-core = { path = "../ledger_core" }
 icrc-ledger-types = { path = "../../../packages/icrc-ledger-types" }
 ic-ledger-hash-of = { path = "../../../packages/ic-ledger-hash-of" }
-num-traits = "0.2.12"
+num-traits = { workspace = true }
 num-bigint = "0.4"
 serde = { workspace = true }
 serde_bytes = { workspace = true }
 tempfile = "3.1.0"
-thiserror = "1.0"
+thiserror = { workspace = true }
 
 [dev-dependencies]
 ic-icrc1-test-utils = { path = "test_utils" }

@@ -158,7 +158,7 @@ mod tests {
         sandbox_safe_system_state::{CanisterStatusView, SandboxSafeSystemState},
         ApiType, ExecutionParameters, InstructionLimits,
     };
-    use ic_test_utilities::types::ids::{canister_test_id, subnet_test_id, user_test_id};
+    use ic_test_utilities_types::ids::{canister_test_id, subnet_test_id, user_test_id};
     use ic_types::{
         ingress::WasmResult,
         messages::{CallContextId, RequestMetadata},
@@ -181,6 +181,7 @@ mod tests {
                 NumInstructions::new(INSTRUCTION_LIMIT),
             ),
             canister_memory_limit: NumBytes::new(4 << 30),
+            wasm_memory_limit: None,
             memory_allocation: MemoryAllocation::default(),
             compute_allocation: ComputeAllocation::default(),
             subnet_type: SubnetType::Application,
@@ -189,7 +190,7 @@ mod tests {
         }
     }
 
-    fn sandbox_safe_system_state() -> SandboxSafeSystemState {
+    fn sandbox_safe_system_state(caller: Option<PrincipalId>) -> SandboxSafeSystemState {
         let mut ic00_aliases = BTreeSet::new();
         ic00_aliases.insert(canister_test_id(0));
         let controller = user_test_id(0).get();
@@ -219,6 +220,8 @@ mod tests {
             0,
             BTreeSet::from([controller]),
             RequestMetadata::new(0, Time::from_nanos_since_unix_epoch(0)),
+            caller,
+            0,
         )
     }
 
@@ -243,15 +246,17 @@ mod tests {
         next_wasm_memory_id: MemoryId,
         next_stable_memory_id: MemoryId,
     ) -> SandboxExecInput {
+        let api_type = ApiType::update(
+            Time::from_nanos_since_unix_epoch(0),
+            incoming_payload.to_vec(),
+            Cycles::zero(),
+            PrincipalId::try_from([0].as_ref()).unwrap(),
+            CallContextId::from(0),
+        );
+        let caller = api_type.caller();
         SandboxExecInput {
             func_ref: FuncRef::Method(WasmMethod::Update(method_name.to_string())),
-            api_type: ApiType::update(
-                Time::from_nanos_since_unix_epoch(0),
-                incoming_payload.to_vec(),
-                Cycles::zero(),
-                PrincipalId::try_from([0].as_ref()).unwrap(),
-                CallContextId::from(0),
-            ),
+            api_type,
             globals,
             canister_current_memory_usage: NumBytes::from(0),
             canister_current_message_memory_usage: NumBytes::from(0),
@@ -263,7 +268,7 @@ mod tests {
             ),
             next_wasm_memory_id,
             next_stable_memory_id,
-            sandbox_safe_system_state: sandbox_safe_system_state(),
+            sandbox_safe_system_state: sandbox_safe_system_state(caller),
             wasm_reserved_pages: NumWasmPages::from(0),
         }
     }
@@ -273,14 +278,16 @@ mod tests {
         incoming_payload: &[u8],
         globals: Vec<Global>,
     ) -> SandboxExecInput {
+        let api_type = ApiType::replicated_query(
+            Time::from_nanos_since_unix_epoch(0),
+            incoming_payload.to_vec(),
+            PrincipalId::try_from([0].as_ref()).unwrap(),
+            None,
+        );
+        let caller = api_type.caller();
         SandboxExecInput {
             func_ref: FuncRef::Method(WasmMethod::Query(method_name.to_string())),
-            api_type: ApiType::replicated_query(
-                Time::from_nanos_since_unix_epoch(0),
-                incoming_payload.to_vec(),
-                PrincipalId::try_from([0].as_ref()).unwrap(),
-                None,
-            ),
+            api_type,
             globals,
             canister_current_memory_usage: NumBytes::from(0),
             canister_current_message_memory_usage: NumBytes::from(0),
@@ -292,7 +299,7 @@ mod tests {
             ),
             next_wasm_memory_id: MemoryId::new(),
             next_stable_memory_id: MemoryId::new(),
-            sandbox_safe_system_state: sandbox_safe_system_state(),
+            sandbox_safe_system_state: sandbox_safe_system_state(caller),
             wasm_reserved_pages: NumWasmPages::from(0),
         }
     }

@@ -7,15 +7,15 @@ description.workspace = true
 documentation.workspace = true
 
 [dependencies]
-anyhow = "1.0.58"
-async-trait = "0.1.56"
-axum = "0.6.1"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
 chacha20poly1305 = "0.10.0"
-clap = { workspace = true }
+clap = { version = "3.2.25", features = ["derive"] }
 flate2 = "1.0.24"
 futures = { workspace = true }
 httptest = "0.15.4"
-mockall = "0.11.1"
+mockall = { workspace = true }
 nix = { workspace = true }
 opentelemetry = { version = "0.20", features = ["metrics"] }
 opentelemetry-prometheus = "0.13.0"

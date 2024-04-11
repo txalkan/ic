@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, fmt::Write};
 use ic_base_types::{CanisterId, PrincipalId, SubnetId};
 use ic_btc_interface::NetworkInRequest as BitcoinNetwork;
 use ic_error_types::UserError;
-use ic_ic00_types::{
+use ic_management_canister_types::{
     BitcoinGetBalanceArgs, BitcoinGetCurrentFeePercentilesArgs, BitcoinGetUtxosArgs,
     BitcoinSendTransactionArgs, CanisterIdRecord, CanisterInfoRequest, ClearChunkStoreArgs,
     ComputeInitialEcdsaDealingsArgs, ECDSAPublicKeyArgs, EcdsaKeyId, InstallChunkedCodeArgs,
@@ -15,6 +15,9 @@ use ic_ic00_types::{
 use ic_replicated_state::NetworkTopology;
 
 #[derive(Debug)]
+#[allow(dead_code)]
+// The fields are only read by the `Debug` implementation.
+// The `dead_code` lint ignores `Debug` impls, see: https://github.com/rust-lang/rust/issues/88900.
 pub(super) enum ResolveDestinationError {
     UserError(UserError),
     MethodNotFound(String),
@@ -391,11 +394,11 @@ mod tests {
     use assert_matches::assert_matches;
     use candid::Encode;
     use ic_base_types::RegistryVersion;
-    use ic_ic00_types::{
+    use ic_management_canister_types::{
         ComputeInitialEcdsaDealingsArgs, DerivationPath, EcdsaCurve, EcdsaKeyId, SignWithECDSAArgs,
     };
     use ic_replicated_state::SubnetTopology;
-    use ic_test_utilities::types::ids::{canister_test_id, node_test_id, subnet_test_id};
+    use ic_test_utilities_types::ids::{canister_test_id, node_test_id, subnet_test_id};
     use maplit::btreemap;
     use serde_bytes::ByteBuf;
 

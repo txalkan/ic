@@ -2,15 +2,14 @@
 #
 # Packs contents of a tar file into a ext4 image (possibly taking only a
 # subdirectory of the full tar file). The (sparse) ext4 image itself is then
-# wrapped into a tar file itself.
+# wrapped into a tzst file.
 #
 # Call example:
-#   build_ext4_image -s 10M -o partition.img.tar -p boot -i dockerimg.tar -S file_contexts
+#   build_ext4_image -s 10M -o partition.img.tzst -p boot -i dockerimg.tar -S file_contexts
 #
 import argparse
 import atexit
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -102,19 +101,6 @@ def strip_files(fs_basedir, fakeroot_statefile, strip_paths):
             subprocess.run(["fakeroot", "-s", fakeroot_statefile, "-i", fakeroot_statefile, "rm", "-rf", del_path])
 
 
-def install_extra_files(fs_basedir, fakeroot_statefile, extra_files):
-    for extra_file in extra_files:
-        source_file, install_target, mode = extra_file.split(":")
-        if install_target[0] == "/":
-            install_target = install_target[1:]
-        install_target = os.path.join(fs_basedir, install_target)
-        shutil.copy(source_file, install_target)
-        os.chmod(install_target, int(mode, 8))
-        subprocess.run(
-            ["fakeroot", "-s", fakeroot_statefile, "-i", fakeroot_statefile, "chown", "root.root", install_target]
-        )
-
-
 def prepare_tree_from_tar(in_file, fakeroot_statefile, fs_basedir, dir_to_extract):
     if in_file:
         subprocess.run(
@@ -185,7 +171,7 @@ def fixup_permissions(fs_rootdir, fakeroot_statefile, image_file):
 def make_argparser():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--size", help="Size of image to build", type=str)
-    parser.add_argument("-o", "--output", help="Target (tar) file to write partition image to", type=str)
+    parser.add_argument("-o", "--output", help="Target (tzst) file to write partition image to", type=str)
     parser.add_argument(
         "-i", "--input", help="Source (tar) file to take files from", type=str, default="", required=False
     )
@@ -213,13 +199,7 @@ def make_argparser():
         default=[],
         help="Directories to be cleared from the tree; expects a list of full paths",
     )
-    parser.add_argument(
-        "extra_files",
-        metavar="extra_files",
-        type=str,
-        nargs="*",
-        help="Extra files to install; expects list of sourcefile:targetfile:mode",
-    )
+    parser.add_argument("-d", "--dflate", help="Path to dflate", type=str)
     return parser
 
 
@@ -232,7 +212,6 @@ def main():
     limit_prefix = args.path
     file_contexts_file = args.file_contexts
     strip_paths = args.strip_paths
-    extra_files = args.extra_files
     if limit_prefix and limit_prefix[0] == "/":
         limit_prefix = limit_prefix[1:]
 
@@ -255,7 +234,6 @@ def main():
     # ownership will be preserved while unpacking (see below).
     prepare_tree_from_tar(in_file, fakeroot_statefile, fs_basedir, limit_prefix)
     strip_files(fs_basedir, fakeroot_statefile, strip_paths)
-    install_extra_files(fs_basedir, fakeroot_statefile, extra_files)
     subprocess.run(['sync'], check=True)
 
     # Now build the basic filesystem image. Wrap again in fakeroot
@@ -279,22 +257,29 @@ def main():
     fixup_permissions(os.path.join(fs_basedir, limit_prefix), fakeroot_statefile, image_file)
 
     subprocess.run(['sync'], check=True)
-    # Wrap the built filesystem image up in a tar file. Use sparse to
-    # deflate all the zeroes left unwritten during build.
+
+    # If dflate is ever misbehaving, it can be replaced with:
+    # tar cf <output> --sort=name --owner=root:0 --group=root:0 --mtime="UTC 1970-01-01 00:00:00" --sparse --hole-detection=raw -C <context_path> <item>
+    temp_tar = os.path.join(tmpdir, "partition.tar")
     subprocess.run(
         [
-            "tar",
-            "cf",
+            args.dflate,
+            "--input",
+            image_file,
+            "--output",
+            temp_tar,
+        ],
+        check=True,
+    )
+
+    subprocess.run(
+        [
+            "zstd",
+            "-q",
+            "--threads=0",
+            temp_tar,
+            "-o",
             out_file,
-            "--sort=name",
-            "--owner=root:0",
-            "--group=root:0",
-            "--mtime=UTC 1970-01-01 00:00:00",
-            "--sparse",
-            "--hole-detection=raw",
-            "-C",
-            tmpdir,
-            "partition.img",
         ],
         check=True,
     )

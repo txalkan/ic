@@ -23,24 +23,21 @@ def image_deps(mode, _malicious = False):
     """
 
     deps = {
-        # Define rootfs and bootfs
-        "bootfs": {
-            # base layer
-            ":rootfs-tree.tar": "/",
-        },
+        "base_dockerfile": "//ic-os/setupos/rootfs:Dockerfile.base",
+
+        # Extra files to be added to rootfs and bootfs
+        "bootfs": {},
         "rootfs": {
-            # base layer
-            ":rootfs-tree.tar": "/",
             "//publish/binaries:setupos_tool": "/opt/ic/bin/setupos_tool:0755",
         },
 
         # Set various configuration values
-        "container_context_files": Label("//ic-os/setupos:rootfs-files"),
+        "container_context_files": Label("//ic-os/setupos/rootfs:rootfs-files"),
         "partition_table": Label("//ic-os/setupos:partitions.csv"),
         "rootfs_size": "1750M",
         "bootfs_size": "100M",
         "grub_config": Label("//ic-os/setupos:grub.cfg"),
-        "extra_boot_args": Label("//ic-os/setupos:rootfs/extra_boot_args"),
+        "extra_boot_args": Label("//ic-os/setupos/rootfs:extra_boot_args"),
 
         # Add any custom partitions to the manifest
         "custom_partitions": lambda: (_custom_partitions)(mode),
@@ -51,8 +48,11 @@ def image_deps(mode, _malicious = False):
         "dev": {
             "build_container_filesystem_config_file": "//ic-os/setupos/envs/dev:build_container_filesystem_config.txt",
         },
-        "dev-sev": {
-            "build_container_filesystem_config_file": "//ic-os/setupos/envs/dev-sev:build_container_filesystem_config.txt",
+        "local-base-dev": {
+            "build_container_filesystem_config_file": "//ic-os/setupos/envs/dev:build_container_filesystem_config.txt",
+        },
+        "local-base-prod": {
+            "build_container_filesystem_config_file": "//ic-os/setupos/envs/prod:build_container_filesystem_config.txt",
         },
         "prod": {
             "build_container_filesystem_config_file": "//ic-os/setupos/envs/prod:build_container_filesystem_config.txt",
@@ -63,27 +63,34 @@ def image_deps(mode, _malicious = False):
 
     return deps
 
-# Inject a step building a data partition that contains either dev, dev-sev or prod
+# Inject a step building a data partition that contains either dev or prod
 # child images, depending on this build variant.
 def _custom_partitions(mode):
     if mode == "dev":
         guest_image = Label("//ic-os/guestos/envs/dev:disk-img.tar.zst")
         host_image = Label("//ic-os/hostos/envs/dev:disk-img.tar.zst")
         nns_url = "https://dfinity.org"
-    elif mode == "dev-sev":
-        guest_image = Label("//ic-os/guestos/envs/dev-sev:disk-img.tar.zst")
-        host_image = Label("//ic-os/hostos/envs/dev-sev:disk-img.tar.zst")
+    elif mode == "local-base-dev":
+        guest_image = Label("//ic-os/guestos/envs/local-base-dev:disk-img.tar.zst")
+        host_image = Label("//ic-os/hostos/envs/local-base-dev:disk-img.tar.zst")
         nns_url = "https://dfinity.org"
-    else:
+    elif mode == "local-base-prod":
+        guest_image = Label("//ic-os/guestos/envs/local-base-prod:disk-img.tar.zst")
+        host_image = Label("//ic-os/hostos/envs/local-base-prod:disk-img.tar.zst")
+        nns_url = "https://icp-api.io,https://icp0.io,https://ic0.app"
+    elif mode == "prod":
         guest_image = Label("//ic-os/guestos/envs/prod:disk-img.tar.zst")
         host_image = Label("//ic-os/hostos/envs/prod:disk-img.tar.zst")
         nns_url = "https://icp-api.io,https://icp0.io,https://ic0.app"
+    else:
+        fail("Unkown mode detected: " + mode)
 
     copy_file(
         name = "copy_guestos_img",
         src = guest_image,
         out = "guest-os.img.tar.zst",
         allow_symlink = True,
+        tags = ["manual"],
     )
 
     copy_file(
@@ -91,6 +98,7 @@ def _custom_partitions(mode):
         src = host_image,
         out = "host-os.img.tar.zst",
         allow_symlink = True,
+        tags = ["manual"],
     )
 
     config_dict = {
@@ -98,7 +106,7 @@ def _custom_partitions(mode):
         Label("//ic-os/setupos:config/ssh_authorized_keys/admin"): "ssh_authorized_keys/admin",
     }
 
-    if mode == "dev" or mode == "dev-sev":
+    if mode == "dev":
         config_dict[Label("//ic-os/setupos:config/node_operator_private_key.pem")] = "node_operator_private_key.pem"
 
     pkg_tar(
@@ -106,10 +114,11 @@ def _custom_partitions(mode):
         files = config_dict,
         mode = "0644",
         package_dir = "config",
+        tags = ["manual"],
     )
 
     fat32_image(
-        name = "partition-config.tar",
+        name = "partition-config.tzst",
         src = "config_tar",
         label = "CONFIG",
         partition_size = "50M",
@@ -117,6 +126,7 @@ def _custom_partitions(mode):
         target_compatible_with = [
             "@platforms//os:linux",
         ],
+        tags = ["manual"],
     )
 
     native.genrule(
@@ -124,6 +134,7 @@ def _custom_partitions(mode):
         srcs = [Label("//ic-os/setupos:data/deployment.json.template")],
         outs = ["deployment.json"],
         cmd = "sed -e 's#NNS_URL#{nns_url}#' < $< > $@".format(nns_url = nns_url),
+        tags = ["manual"],
     )
 
     pkg_tar(
@@ -136,19 +147,21 @@ def _custom_partitions(mode):
         ],
         mode = "0644",
         package_dir = "data",
+        tags = ["manual"],
     )
 
     ext4_image(
-        name = "partition-data.tar",
+        name = "partition-data.tzst",
         src = "data_tar",
         partition_size = "1750M",
         subdir = "data",
         target_compatible_with = [
             "@platforms//os:linux",
         ],
+        tags = ["manual"],
     )
 
     return [
-        ":partition-config.tar",
-        ":partition-data.tar",
+        ":partition-config.tzst",
+        ":partition-data.tzst",
     ]

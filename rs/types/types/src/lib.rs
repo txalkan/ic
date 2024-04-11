@@ -97,7 +97,7 @@ pub use funds::*;
 pub use ic_base_types::{
     subnet_id_into_protobuf, subnet_id_try_from_protobuf, CanisterId, CanisterIdBlobParseError,
     NodeId, NodeTag, NumBytes, PrincipalId, PrincipalIdBlobParseError, PrincipalIdParseError,
-    RegistryVersion, SubnetId,
+    RegistryVersion, SnapshotId, SubnetId,
 };
 pub use ic_crypto_internal_types::NodeIndex;
 use ic_protobuf::proxy::{try_from_option_field, ProxyDecodeError};
@@ -230,7 +230,7 @@ impl ComputeAllocation {
     }
 }
 
-// The default `ComputeAllocation` is 0: https://sdk.dfinity.org/docs/interface-spec/index.html#ic-install_code.
+// The default `ComputeAllocation` is 0: https://internetcomputer.org/docs/current/references/ic-interface-spec#ic-install_code.
 #[allow(clippy::derivable_impls)]
 impl Default for ComputeAllocation {
     fn default() -> Self {

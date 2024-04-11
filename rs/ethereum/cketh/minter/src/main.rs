@@ -3,40 +3,48 @@ use ic_canister_log::log;
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use ic_cketh_minter::address::{validate_address_as_destination, AddressValidationError};
-use ic_cketh_minter::deposit::scrap_eth_logs;
+use ic_cketh_minter::deposit::scrape_logs;
+use ic_cketh_minter::endpoints::ckerc20::{
+    RetrieveErc20Request, WithdrawErc20Arg, WithdrawErc20Error,
+};
 use ic_cketh_minter::endpoints::events::{
     Event as CandidEvent, EventSource as CandidEventSource, GetEventsArg, GetEventsResult,
 };
 use ic_cketh_minter::endpoints::{
-    Eip1559TransactionPrice, RetrieveEthRequest, RetrieveEthStatus, WithdrawalArg, WithdrawalError,
+    AddCkErc20Token, Eip1559TransactionPrice, Erc20Balance, GasFeeEstimate, MinterInfo,
+    RetrieveEthRequest, RetrieveEthStatus, WithdrawalArg, WithdrawalError,
 };
-use ic_cketh_minter::eth_logs::{EventSource, ReceivedEthEvent};
-use ic_cketh_minter::guard::retrieve_eth_guard;
+use ic_cketh_minter::eth_logs::{EventSource, ReceivedErc20Event, ReceivedEthEvent};
+use ic_cketh_minter::guard::retrieve_withdraw_guard;
+use ic_cketh_minter::ledger_client::{LedgerBurnError, LedgerClient};
 use ic_cketh_minter::lifecycle::MinterArg;
-use ic_cketh_minter::logs::{DEBUG, INFO};
+use ic_cketh_minter::logs::INFO;
 use ic_cketh_minter::memo::BurnMemo;
-use ic_cketh_minter::numeric::{LedgerBurnIndex, Wei};
+use ic_cketh_minter::numeric::{Erc20Value, LedgerBurnIndex, Wei};
 use ic_cketh_minter::state::audit::{process_event, Event, EventType};
-use ic_cketh_minter::state::transactions::{EthWithdrawalRequest, Reimbursed};
-use ic_cketh_minter::state::{lazy_call_ecdsa_public_key, mutate_state, read_state, State, STATE};
-use ic_cketh_minter::tx::estimate_transaction_price;
-use ic_cketh_minter::withdraw::{
-    eth_fee_history, process_reimbursement, process_retrieve_eth_requests,
+use ic_cketh_minter::state::transactions::{
+    Erc20WithdrawalRequest, EthWithdrawalRequest, Reimbursed, ReimbursementRequest,
 };
+use ic_cketh_minter::state::{lazy_call_ecdsa_public_key, mutate_state, read_state, State, STATE};
+use ic_cketh_minter::tx::lazy_refresh_gas_fee_estimate;
+use ic_cketh_minter::withdraw::{
+    process_reimbursement, process_retrieve_eth_requests, CKERC20_WITHDRAWAL_TRANSACTION_GAS_LIMIT,
+    CKETH_WITHDRAWAL_TRANSACTION_GAS_LIMIT,
+};
+use ic_cketh_minter::{endpoints, erc20};
 use ic_cketh_minter::{
     state, storage, PROCESS_ETH_RETRIEVE_TRANSACTIONS_INTERVAL, PROCESS_REIMBURSEMENT,
     SCRAPPING_ETH_LOGS_INTERVAL,
 };
 use ic_ethereum_types::Address;
-use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
-use icrc_ledger_types::icrc1::transfer::Memo;
-use icrc_ledger_types::icrc2::transfer_from::TransferFromArgs;
-use num_traits::cast::ToPrimitive;
+use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::time::Duration;
 
 mod dashboard;
+
 pub const SEPOLIA_TEST_CHAIN_ID: u64 = 11155111;
+pub const CKETH_LEDGER_TRANSACTION_FEE: Wei = Wei::new(2_000_000_000_000_u128);
 
 fn validate_caller_not_anonymous() -> candid::Principal {
     let principal = ic_cdk::caller();
@@ -44,6 +52,12 @@ fn validate_caller_not_anonymous() -> candid::Principal {
         panic!("anonymous principal is not allowed");
     }
     principal
+}
+
+fn validate_ckerc20_active() {
+    if !read_state(State::is_ckerc20_feature_active) {
+        ic_cdk::trap("ckERC20 feature is disabled");
+    }
 }
 
 fn setup_timers() {
@@ -54,10 +68,8 @@ fn setup_timers() {
         })
     });
     // Start scraping logs immediately after the install, then repeat with the interval.
-    ic_cdk_timers::set_timer(Duration::from_secs(0), || ic_cdk::spawn(scrap_eth_logs()));
-    ic_cdk_timers::set_timer_interval(SCRAPPING_ETH_LOGS_INTERVAL, || {
-        ic_cdk::spawn(scrap_eth_logs())
-    });
+    ic_cdk_timers::set_timer(Duration::from_secs(0), || ic_cdk::spawn(scrape_logs()));
+    ic_cdk_timers::set_timer_interval(SCRAPPING_ETH_LOGS_INTERVAL, || ic_cdk::spawn(scrape_logs()));
     ic_cdk_timers::set_timer_interval(PROCESS_ETH_RETRIEVE_TRANSACTIONS_INTERVAL, || {
         ic_cdk::spawn(process_retrieve_eth_requests())
     });
@@ -89,6 +101,9 @@ fn emit_preupgrade_events() {
         storage::record_event(EventType::SyncedToBlock {
             block_number: s.last_scraped_block_number,
         });
+        storage::record_event(EventType::SyncedErc20ToBlock {
+            block_number: s.last_erc20_scraped_block_number,
+        });
     });
 }
 
@@ -117,23 +132,73 @@ async fn minter_address() -> String {
 
 #[query]
 async fn smart_contract_address() -> String {
-    read_state(|s| s.ethereum_contract_address)
+    read_state(|s| s.eth_helper_contract_address)
         .map(|a| a.to_string())
         .unwrap_or("N/A".to_string())
 }
 
 /// Estimate price of EIP-1559 transaction based on the
 /// `base_fee_per_gas` included in the last finalized block.
-/// See https://www.blocknative.com/blog/eip-1559-fees
-#[update]
+#[query]
 async fn eip_1559_transaction_price() -> Eip1559TransactionPrice {
-    let transaction_price = estimate_transaction_price(
-        &eth_fee_history()
-            .await
-            .expect("ERROR: failed to retrieve fee history"),
-    )
-    .expect("ERROR: failed to estimate transaction price");
-    Eip1559TransactionPrice::from(transaction_price)
+    match read_state(|s| s.last_transaction_price_estimate.clone()) {
+        Some((ts, estimate)) => {
+            let mut result = Eip1559TransactionPrice::from(
+                estimate.to_price(CKETH_WITHDRAWAL_TRANSACTION_GAS_LIMIT),
+            );
+            result.timestamp = Some(ts);
+            result
+        }
+        None => ic_cdk::trap("ERROR: last transaction price estimate is not available"),
+    }
+}
+
+/// Returns the current parameters used by the minter.
+/// This includes information that can be retrieved form other endpoints as well.
+/// To retain some flexibility in the API all fields in the return value are optional.
+#[query]
+async fn get_minter_info() -> MinterInfo {
+    read_state(|s| {
+        let (erc20_balances, supported_ckerc20_tokens) = if s.is_ckerc20_feature_active() {
+            let (balances, tokens) = s
+                .supported_ck_erc20_tokens()
+                .map(|token| {
+                    (
+                        Erc20Balance {
+                            erc20_contract_address: token.erc20_contract_address.to_string(),
+                            balance: s
+                                .erc20_balances
+                                .balance_of(&token.erc20_contract_address)
+                                .into(),
+                        },
+                        endpoints::CkErc20Token::from(token),
+                    )
+                })
+                .unzip();
+            (Some(balances), Some(tokens))
+        } else {
+            (None, None)
+        };
+
+        MinterInfo {
+            minter_address: s.minter_address().map(|a| a.to_string()),
+            eth_helper_contract_address: s.eth_helper_contract_address.map(|a| a.to_string()),
+            erc20_helper_contract_address: s.erc20_helper_contract_address.map(|a| a.to_string()),
+            supported_ckerc20_tokens,
+            minimum_withdrawal_amount: Some(s.minimum_withdrawal_amount.into()),
+            ethereum_block_height: Some(s.ethereum_block_height.into()),
+            last_observed_block_number: s.last_observed_block_number.map(|n| n.into()),
+            eth_balance: Some(s.eth_balance.eth_balance().into()),
+            last_gas_fee_estimate: s.last_transaction_price_estimate.as_ref().map(
+                |(timestamp, estimate)| GasFeeEstimate {
+                    max_fee_per_gas: estimate.estimate_max_fee_per_gas().into(),
+                    max_priority_fee_per_gas: estimate.max_priority_fee_per_gas.into(),
+                    timestamp: *timestamp,
+                },
+            ),
+            erc20_balances,
+        }
+    })
 }
 
 #[update]
@@ -141,7 +206,7 @@ async fn withdraw_eth(
     WithdrawalArg { amount, recipient }: WithdrawalArg,
 ) -> Result<RetrieveEthRequest, WithdrawalError> {
     let caller = validate_caller_not_anonymous();
-    let _guard = retrieve_eth_guard(caller).unwrap_or_else(|e| {
+    let _guard = retrieve_withdraw_guard(caller).unwrap_or_else(|e| {
         ic_cdk::trap(&format!(
             "Failed retrieving guard for principal {}: {:?}",
             caller, e
@@ -166,33 +231,20 @@ async fn withdraw_eth(
         });
     }
 
-    let ledger_canister_id = read_state(|s| s.ledger_id);
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id,
-    };
-
+    let client = read_state(LedgerClient::cketh_ledger_from_state);
     let now = ic_cdk::api::time();
-
     log!(INFO, "[withdraw]: burning {:?}", amount);
     match client
-        .transfer_from(TransferFromArgs {
-            spender_subaccount: None,
-            from: caller.into(),
-            to: ic_cdk::id().into(),
-            amount: Nat::from(amount),
-            fee: None,
-            memo: Some(Memo::from(BurnMemo::Convert {
+        .burn_from(
+            caller.into(),
+            amount,
+            BurnMemo::Convert {
                 to_address: destination,
-            })),
-            created_at_time: None, // We don't set this field to disable transaction deduplication
-                                   // which is unnecessary in canister-to-canister calls.
-        })
+            },
+        )
         .await
     {
-        Ok(Ok(block_index)) => {
-            let ledger_burn_index =
-                LedgerBurnIndex::new(block_index.0.to_u64().expect("nat does not fit into u64"));
+        Ok(ledger_burn_index) => {
             let withdrawal_request = EthWithdrawalRequest {
                 withdrawal_amount: amount,
                 destination,
@@ -216,23 +268,7 @@ async fn withdraw_eth(
             });
             Ok(RetrieveEthRequest::from(withdrawal_request))
         }
-        Ok(Err(error)) => {
-            log!(
-                DEBUG,
-                "[withdraw]: failed to transfer_from with error: {error:?}"
-            );
-            Err(WithdrawalError::from(error))
-        }
-        Err((error_code, message)) => {
-            log!(
-                DEBUG,
-                "[withdraw]: failed to call ledger with error_code: {error_code} and message: {message}",
-            );
-            Err(WithdrawalError::TemporarilyUnavailable(
-                "failed to call ledger with error_code: {error_code} and message: {message}"
-                    .to_string(),
-            ))
-        }
+        Err(e) => Err(WithdrawalError::from(e)),
     }
 }
 
@@ -242,11 +278,173 @@ async fn retrieve_eth_status(block_index: u64) -> RetrieveEthStatus {
     read_state(|s| s.eth_transactions.transaction_status(&ledger_burn_index))
 }
 
+#[update]
+async fn withdraw_erc20(
+    WithdrawErc20Arg {
+        amount,
+        ckerc20_ledger_id,
+        recipient,
+    }: WithdrawErc20Arg,
+) -> Result<RetrieveErc20Request, WithdrawErc20Error> {
+    validate_ckerc20_active();
+    let caller = validate_caller_not_anonymous();
+    let _guard = retrieve_withdraw_guard(caller).unwrap_or_else(|e| {
+        ic_cdk::trap(&format!(
+            "Failed retrieving guard for principal {}: {:?}",
+            caller, e
+        ))
+    });
+
+    let destination = validate_address_as_destination(&recipient).map_err(|e| match e {
+        AddressValidationError::Invalid { .. } | AddressValidationError::NotSupported(_) => {
+            ic_cdk::trap(&e.to_string())
+        }
+        AddressValidationError::Blocked(address) => WithdrawErc20Error::RecipientAddressBlocked {
+            address: address.to_string(),
+        },
+    })?;
+    let ckerc20_withdrawal_amount =
+        Erc20Value::try_from(amount).expect("ERROR: failed to convert Nat to u256");
+
+    let ckerc20_token = read_state(|s| s.find_ck_erc20_token_by_ledger_id(&ckerc20_ledger_id))
+        .ok_or_else(|| {
+            let supported_ckerc20_tokens: BTreeSet<_> = read_state(|s| {
+                s.supported_ck_erc20_tokens()
+                    .map(|token| token.into())
+                    .collect()
+            });
+            WithdrawErc20Error::TokenNotSupported {
+                supported_tokens: Vec::from_iter(supported_ckerc20_tokens),
+            }
+        })?;
+    let cketh_ledger = read_state(LedgerClient::cketh_ledger_from_state);
+    let erc20_tx_fee = estimate_erc20_transaction_fee().await.ok_or_else(|| {
+        WithdrawErc20Error::TemporarilyUnavailable("Failed to retrieve current gas fee".to_string())
+    })?;
+    let now = ic_cdk::api::time();
+    log!(INFO, "[withdraw_erc20]: burning {:?} ckETH", erc20_tx_fee);
+    match cketh_ledger
+        .burn_from(
+            caller.into(),
+            erc20_tx_fee,
+            BurnMemo::Erc20GasFee {
+                ckerc20_token_symbol: ckerc20_token.ckerc20_token_symbol.clone(),
+                ckerc20_withdrawal_amount,
+                to_address: destination,
+            },
+        )
+        .await
+    {
+        Ok(cketh_ledger_burn_index) => {
+            log!(
+                INFO,
+                "[withdraw_erc20]: burning {} {}",
+                ckerc20_withdrawal_amount,
+                ckerc20_token.ckerc20_token_symbol
+            );
+            match LedgerClient::ckerc20_ledger(&ckerc20_token)
+                .burn_from(
+                    caller.into(),
+                    ckerc20_withdrawal_amount,
+                    BurnMemo::Erc20Convert {
+                        ckerc20_withdrawal_id: cketh_ledger_burn_index.get(),
+                        to_address: destination,
+                    },
+                )
+                .await
+            {
+                Ok(ckerc20_ledger_burn_index) => {
+                    let withdrawal_request = Erc20WithdrawalRequest {
+                        max_transaction_fee: erc20_tx_fee,
+                        withdrawal_amount: ckerc20_withdrawal_amount,
+                        destination,
+                        cketh_ledger_burn_index,
+                        ckerc20_ledger_id: ckerc20_token.ckerc20_ledger_id,
+                        ckerc20_ledger_burn_index,
+                        erc20_contract_address: ckerc20_token.erc20_contract_address,
+                        from: caller,
+                        from_subaccount: None,
+                        created_at: now,
+                    };
+                    log!(
+                        INFO,
+                        "[withdraw_erc20]: queuing withdrawal request {:?}",
+                        withdrawal_request
+                    );
+                    mutate_state(|s| {
+                        process_event(
+                            s,
+                            EventType::AcceptedErc20WithdrawalRequest(withdrawal_request.clone()),
+                        );
+                    });
+                    Ok(RetrieveErc20Request::from(withdrawal_request))
+                }
+                Err(ckerc20_burn_error) => {
+                    let reimbursed_amount = match &ckerc20_burn_error {
+                        LedgerBurnError::TemporarilyUnavailable { .. } => erc20_tx_fee, //don't penalize user in case of an error outside of their control
+                        LedgerBurnError::InsufficientFunds { .. }
+                        | LedgerBurnError::InsufficientAllowance { .. } => erc20_tx_fee
+                            .checked_sub(CKETH_LEDGER_TRANSACTION_FEE)
+                            .unwrap_or(Wei::ZERO),
+                    };
+                    if reimbursed_amount > Wei::ZERO {
+                        let reimbursement_request = ReimbursementRequest {
+                            ledger_burn_index: cketh_ledger_burn_index,
+                            reimbursed_amount: reimbursed_amount.change_units(),
+                            to: caller,
+                            to_subaccount: None,
+                            transaction_hash: None,
+                        };
+                        mutate_state(|s| {
+                            process_event(
+                                s,
+                                EventType::FailedErc20WithdrawalRequest(reimbursement_request),
+                            );
+                        });
+                    }
+                    Err(WithdrawErc20Error::CkErc20LedgerError {
+                        cketh_block_index: Nat::from(cketh_ledger_burn_index.get()),
+                        error: ckerc20_burn_error.into(),
+                    })
+                }
+            }
+        }
+        Err(cketh_burn_error) => Err(WithdrawErc20Error::CkEthLedgerError {
+            error: cketh_burn_error.into(),
+        }),
+    }
+}
+
+async fn estimate_erc20_transaction_fee() -> Option<Wei> {
+    lazy_refresh_gas_fee_estimate()
+        .await
+        .map(|gas_fee_estimate| {
+            gas_fee_estimate
+                .to_price(CKERC20_WITHDRAWAL_TRANSACTION_GAS_LIMIT)
+                .max_transaction_fee()
+        })
+}
+
 #[query]
 fn is_address_blocked(address_string: String) -> bool {
     let address = Address::from_str(&address_string)
         .unwrap_or_else(|e| ic_cdk::trap(&format!("invalid recipient address: {:?}", e)));
-    ic_cketh_minter::blocklist::is_blocked(address)
+    ic_cketh_minter::blocklist::is_blocked(&address)
+}
+
+#[update]
+async fn add_ckerc20_token(erc20_token: AddCkErc20Token) {
+    let orchestrator_id = read_state(|s| s.ledger_suite_orchestrator_id)
+        .unwrap_or_else(|| ic_cdk::trap("ERROR: ERC-20 feature is not activated"));
+    if orchestrator_id != ic_cdk::caller() {
+        ic_cdk::trap(&format!(
+            "ERROR: only the orchestrator {} can add ERC-20 tokens",
+            orchestrator_id
+        ));
+    }
+    let ckerc20_token = erc20::CkErc20Token::try_from(erc20_token)
+        .unwrap_or_else(|e| ic_cdk::trap(&format!("ERROR: {}", e)));
+    mutate_state(|s| process_event(s, EventType::AddedCkErc20Token(ckerc20_token)));
 }
 
 #[update]
@@ -348,6 +546,23 @@ fn get_events(arg: GetEventsArg) -> GetEventsResult {
                     value: value.into(),
                     principal,
                 },
+                EventType::AcceptedErc20Deposit(ReceivedErc20Event {
+                    transaction_hash,
+                    block_number,
+                    log_index,
+                    from_address,
+                    value,
+                    principal,
+                    erc20_contract_address,
+                }) => EP::AcceptedErc20Deposit {
+                    transaction_hash: transaction_hash.to_string(),
+                    block_number: block_number.into(),
+                    log_index: log_index.into(),
+                    from_address: from_address.to_string(),
+                    value: value.into(),
+                    principal,
+                    erc20_contract_address: erc20_contract_address.to_string(),
+                },
                 EventType::InvalidDeposit {
                     event_source,
                     reason,
@@ -363,6 +578,9 @@ fn get_events(arg: GetEventsArg) -> GetEventsResult {
                     mint_block_index: mint_block_index.get().into(),
                 },
                 EventType::SyncedToBlock { block_number } => EP::SyncedToBlock {
+                    block_number: block_number.into(),
+                },
+                EventType::SyncedErc20ToBlock { block_number } => EP::SyncedErc20ToBlock {
                     block_number: block_number.into(),
                 },
                 EventType::AcceptedEthWithdrawalRequest(EthWithdrawalRequest {
@@ -409,7 +627,7 @@ fn get_events(arg: GetEventsArg) -> GetEventsResult {
                     transaction_receipt: map_transaction_receipt(transaction_receipt),
                 },
                 EventType::ReimbursedEthWithdrawal(Reimbursed {
-                    withdrawal_id,
+                    burn_in_block: withdrawal_id,
                     reimbursed_in_block,
                     reimbursed_amount,
                     transaction_hash,
@@ -419,8 +637,72 @@ fn get_events(arg: GetEventsArg) -> GetEventsResult {
                     reimbursed_amount: reimbursed_amount.into(),
                     transaction_hash: transaction_hash.map(|h| h.to_string()),
                 },
+                EventType::ReimbursedErc20Withdrawal {
+                    cketh_ledger_burn_index,
+                    ckerc20_ledger_id,
+                    reimbursed,
+                } => EP::ReimbursedErc20Withdrawal {
+                    withdrawal_id: cketh_ledger_burn_index.get().into(),
+                    burn_in_block: reimbursed.burn_in_block.get().into(),
+                    ledger_id: ckerc20_ledger_id,
+                    reimbursed_in_block: reimbursed.reimbursed_in_block.get().into(),
+                    reimbursed_amount: reimbursed.reimbursed_amount.into(),
+                    transaction_hash: reimbursed.transaction_hash.map(|h| h.to_string()),
+                },
                 EventType::SkippedBlock(block_number) => EP::SkippedBlock {
                     block_number: block_number.into(),
+                },
+                EventType::AddedCkErc20Token(token) => EP::AddedCkErc20Token {
+                    chain_id: token.erc20_ethereum_network.chain_id().into(),
+                    address: token.erc20_contract_address.to_string(),
+                    ckerc20_token_symbol: token.ckerc20_token_symbol.to_string(),
+                    ckerc20_ledger_id: token.ckerc20_ledger_id,
+                },
+                EventType::AcceptedErc20WithdrawalRequest(Erc20WithdrawalRequest {
+                    max_transaction_fee,
+                    withdrawal_amount,
+                    destination,
+                    cketh_ledger_burn_index,
+                    erc20_contract_address,
+                    ckerc20_ledger_id,
+                    ckerc20_ledger_burn_index,
+                    from,
+                    from_subaccount,
+                    created_at,
+                }) => EP::AcceptedErc20WithdrawalRequest {
+                    max_transaction_fee: max_transaction_fee.into(),
+                    withdrawal_amount: withdrawal_amount.into(),
+                    erc20_contract_address: erc20_contract_address.to_string(),
+                    destination: destination.to_string(),
+                    cketh_ledger_burn_index: cketh_ledger_burn_index.get().into(),
+                    ckerc20_ledger_id,
+                    ckerc20_ledger_burn_index: ckerc20_ledger_burn_index.get().into(),
+                    from,
+                    from_subaccount: from_subaccount.map(|s| s.0),
+                    created_at,
+                },
+                EventType::MintedCkErc20 {
+                    event_source,
+                    mint_block_index,
+                    ckerc20_token_symbol,
+                    erc20_contract_address,
+                } => EP::MintedCkErc20 {
+                    event_source: map_event_source(event_source),
+                    mint_block_index: mint_block_index.get().into(),
+                    ckerc20_token_symbol,
+                    erc20_contract_address: erc20_contract_address.to_string(),
+                },
+                EventType::FailedErc20WithdrawalRequest(ReimbursementRequest {
+                    ledger_burn_index,
+                    reimbursed_amount,
+                    to,
+                    to_subaccount,
+                    transaction_hash: _,
+                }) => EP::FailedErc20WithdrawalRequest {
+                    withdrawal_id: ledger_burn_index.get().into(),
+                    reimbursed_amount: reimbursed_amount.into(),
+                    to,
+                    to_subaccount: to_subaccount.map(|s| s.0),
                 },
             },
         }
@@ -526,6 +808,15 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                     "The age of the oldest incomplete ETH withdrawal request in seconds.",
                 )?;
 
+                w.encode_gauge(
+                    "cketh_minter_last_max_fee_per_gas",
+                    s.last_transaction_price_estimate
+                        .clone()
+                        .map(|(_, fee)| fee.estimate_max_fee_per_gas().as_f64())
+                        .unwrap_or_default(),
+                    "Last max fee per gas",
+                )?;
+
                 ic_cketh_minter::eth_rpc::encode_metrics(w)?;
 
                 Ok(())
@@ -559,7 +850,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                 Err(_) => {
                     return HttpResponseBuilder::bad_request()
                         .with_body_and_content_length("failed to parse the 'time' parameter")
-                        .build()
+                        .build();
                 }
             },
             None => 0,

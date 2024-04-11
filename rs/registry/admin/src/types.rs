@@ -6,7 +6,7 @@ use ic_protobuf::registry::{
     subnet::v1::{GossipConfig as GossipConfigProto, SubnetRecord as SubnetRecordProto},
 };
 use ic_registry_provisional_whitelist::ProvisionalWhitelist;
-use ic_registry_subnet_features::{EcdsaConfig, SubnetFeatures};
+use ic_registry_subnet_features::{ChainKeyConfig, EcdsaConfig, SubnetFeatures};
 use ic_registry_subnet_type::SubnetType;
 use ic_types::PrincipalId;
 use indexmap::IndexMap;
@@ -70,6 +70,7 @@ pub(crate) struct SubnetRecord {
     pub ssh_readonly_access: Vec<String>,
     pub ssh_backup_access: Vec<String>,
     pub ecdsa_config: Option<EcdsaConfig>,
+    pub chain_key_config: Option<ChainKeyConfig>,
 }
 
 impl SubnetRecord {
@@ -125,6 +126,8 @@ impl From<&SubnetRecordProto> for SubnetRecord {
                 .ecdsa_config
                 .as_ref()
                 .map(|c| c.clone().try_into().unwrap()),
+            // TODO[NNS1-2969]: Use this field rather than ecdsa_config.
+            chain_key_config: None,
         }
     }
 }
@@ -133,7 +136,9 @@ impl From<&SubnetRecordProto> for SubnetRecord {
 /// Ipv4 is parsed into Ipv4Addr. Other fields are omitted for now.
 #[derive(Serialize, Clone)]
 pub(crate) struct IPv4Interface {
-    pub ipv4: Ipv4Addr,
+    pub address: Ipv4Addr,
+    pub gateways: Vec<Ipv4Addr>,
+    pub prefix_length: u32,
 }
 
 /// Encapsulates a node/node operator id pair.
@@ -145,15 +150,22 @@ pub(crate) struct NodeDetails {
     pub node_provider_id: PrincipalId,
     pub dc_id: String,
     pub hostos_version_id: Option<String>,
+    pub domain: Option<String>,
 }
 
 impl From<IPv4InterfaceConfig> for IPv4Interface {
     fn from(value: IPv4InterfaceConfig) -> Self {
         Self {
-            ipv4: value
+            address: value
                 .ip_addr
                 .parse::<Ipv4Addr>()
                 .expect("couldn't parse ipv4 address"),
+            gateways: value
+                .gateway_ip_addr
+                .into_iter()
+                .map(|s| s.parse::<Ipv4Addr>().expect("couldn't parse ipv4 address"))
+                .collect(),
+            prefix_length: value.prefix_length,
         }
     }
 }

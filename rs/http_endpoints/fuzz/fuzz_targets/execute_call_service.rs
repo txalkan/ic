@@ -1,9 +1,11 @@
 #![no_main]
 use arbitrary::Arbitrary;
+use axum::body::Body;
 use bytes::Bytes;
-use hyper::{Body, Method, Request, Response};
+use http_body_util::Full;
+use hyper::{Method, Request, Response};
 use ic_agent::{
-    agent::{http_transport::reqwest_transport::ReqwestHttpReplicaV2Transport, UpdateBuilder},
+    agent::{http_transport::reqwest_transport::ReqwestTransport, UpdateBuilder},
     export::Principal,
     identity::AnonymousIdentity,
     Agent,
@@ -15,10 +17,8 @@ use ic_interfaces::ingress_pool::IngressPoolThrottler;
 use ic_interfaces_registry::RegistryClient;
 use ic_logger::replica_logger::no_op_logger;
 use ic_registry_provisional_whitelist::ProvisionalWhitelist;
-use ic_test_utilities::{
-    crypto::temp_crypto_component_with_fake_registry,
-    types::ids::{node_test_id, subnet_test_id},
-};
+use ic_test_utilities::crypto::temp_crypto_component_with_fake_registry;
+use ic_test_utilities_types::ids::{node_test_id, subnet_test_id};
 use ic_types::{messages::SignedIngressContent, PrincipalId};
 use ic_validator_http_request_arbitrary::AnonymousContent;
 use libfuzzer_sys::fuzz_target;
@@ -42,7 +42,7 @@ use common::{basic_registry_client, get_free_localhost_socket_addr, setup_ingres
 
 type IngressFilterHandle =
     Handle<(ProvisionalWhitelist, SignedIngressContent), Result<(), UserError>>;
-type CallServiceEndpoint = BoxCloneService<Request<Bytes>, Response<Body>, Infallible>;
+type CallServiceEndpoint = BoxCloneService<Request<Body>, Response<Body>, Infallible>;
 
 #[derive(Arbitrary, Clone, Debug)]
 struct CallServiceImpl {
@@ -77,7 +77,7 @@ impl IngressPoolThrottler for MockIngressPoolThrottler {
 //
 // To execute the fuzzer run
 // bazel run --config=afl //rs/http_endpoints/fuzz:execute_call_service_afl -- corpus/
-//
+
 fuzz_target!(|call_impls: Vec<CallServiceImpl>| {
     if !call_impls.is_empty() {
         let rt = Runtime::new().unwrap();
@@ -89,20 +89,21 @@ fuzz_target!(|call_impls: Vec<CallServiceImpl>| {
         // Mock ingress filter
         rt.spawn(async move {
             for flag in filter_flags {
-                let (_, resp) = ingress_filter_handle.next_request().await.unwrap();
-                if flag {
-                    resp.send_response(Ok(()))
-                } else {
-                    resp.send_response(Err(UserError::new(
-                        ErrorCode::CanisterNotFound,
-                        "Fuzzing ingress filter error",
-                    )))
+                while let Some((_, resp)) = ingress_filter_handle.next_request().await {
+                    if flag {
+                        resp.send_response(Ok(()))
+                    } else {
+                        resp.send_response(Err(UserError::new(
+                            ErrorCode::CanisterNotFound,
+                            "Fuzzing ingress filter error",
+                        )))
+                    }
                 }
             }
         });
 
         // Mock ingress throttler
-        rt.spawn(async move {
+        rt.block_on(async move {
             for flag in throttler_flags {
                 if let Err(err) = throttler_tx.send(flag).await {
                     eprintln!("Error sending message: {}", err);
@@ -128,7 +129,7 @@ fuzz_target!(|call_impls: Vec<CallServiceImpl>| {
                     canister_id.to_text(),
                 ))
                 .header("Content-Type", "application/cbor")
-                .body(Bytes::from(signed_update_call))
+                .body(Body::new(Full::new(Bytes::from(signed_update_call))))
                 .expect("Failed to build the request");
 
             // The effective_canister_id is added to the request during routing
@@ -145,7 +146,6 @@ fuzz_target!(|call_impls: Vec<CallServiceImpl>| {
                     .await
                     .unwrap()
             });
-            //println!("{:#?}", _res)
         }
     }
 });
@@ -166,7 +166,7 @@ fn new_update_call(
 ) -> Vec<u8> {
     let agent = Agent::builder()
         .with_identity(AnonymousIdentity)
-        .with_transport(ReqwestHttpReplicaV2Transport::create(format!("http://{}", addr)).unwrap())
+        .with_transport(ReqwestTransport::create(format!("http://{}", addr)).unwrap())
         .build()
         .unwrap();
     let update = UpdateBuilder::new(&agent, effective_canister_id, content.method_name)
@@ -190,13 +190,10 @@ fn new_call_service(
 
     let (ingress_filter, ingress_filter_handle) = setup_ingress_filter_mock();
     let ingress_pool_throttler = MockIngressPoolThrottler::new(throttler_rx);
-    //ingress_pool_throttler
-    //    .expect_exceeds_threshold()
-    //    .returning(|| false);
 
     let ingress_throttler = Arc::new(RwLock::new(ingress_pool_throttler));
-
-    let (ingress_tx, _ingress_rx) = crossbeam::channel::unbounded();
+    #[allow(clippy::disallowed_methods)]
+    let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let sig_verifier = Arc::new(temp_crypto_component_with_fake_registry(node_test_id(1)));
 
@@ -216,7 +213,7 @@ fn new_call_service(
                     ingress_tx,
                 )
                 .with_logger(log.clone())
-                .build(),
+                .build_service(),
             ),
     );
     (ingress_filter_handle, call_service)

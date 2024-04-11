@@ -28,7 +28,9 @@ use ic_metrics::MetricsRegistry;
 use ic_registry_client_helpers::subnet::SubnetRegistry;
 use ic_replicated_state::ReplicatedState;
 use ic_types::{
-    batch::{CanisterHttpPayload, ValidationContext, MAX_CANISTER_HTTP_PAYLOAD_SIZE},
+    batch::{
+        CanisterHttpPayload, ConsensusResponse, ValidationContext, MAX_CANISTER_HTTP_PAYLOAD_SIZE,
+    },
     canister_http::{
         CanisterHttpResponse, CanisterHttpResponseContent, CanisterHttpResponseDivergence,
         CanisterHttpResponseMetadata, CanisterHttpResponseProof, CanisterHttpResponseWithConsensus,
@@ -36,10 +38,10 @@ use ic_types::{
     },
     consensus::Committee,
     crypto::Signed,
-    messages::{CallbackId, Payload, RejectContext, Response},
+    messages::{CallbackId, Payload, RejectContext},
     registry::RegistryClientError,
     signature::BasicSignature,
-    CanisterId, CountBytes, Cycles, Height, NodeId, NumBytes, RegistryVersion, SubnetId,
+    CountBytes, Height, NodeId, NumBytes, RegistryVersion, SubnetId,
 };
 use std::{
     collections::{BTreeSet, HashSet},
@@ -640,8 +642,10 @@ impl BatchPayloadBuilder for CanisterHttpPayloadBuilderImpl {
     }
 }
 
-impl IntoMessages<(Vec<Response>, CanisterHttpBatchStats)> for CanisterHttpPayloadBuilderImpl {
-    fn into_messages(payload: &[u8]) -> (Vec<Response>, CanisterHttpBatchStats) {
+impl IntoMessages<(Vec<ConsensusResponse>, CanisterHttpBatchStats)>
+    for CanisterHttpPayloadBuilderImpl
+{
+    fn into_messages(payload: &[u8]) -> (Vec<ConsensusResponse>, CanisterHttpBatchStats) {
         let mut stats = CanisterHttpBatchStats::default();
 
         let messages = bytes_to_payload(payload)
@@ -649,7 +653,7 @@ impl IntoMessages<(Vec<Response>, CanisterHttpBatchStats)> for CanisterHttpPaylo
 
         let responses = messages.responses.into_iter().map(|response| {
             stats.responses += 1;
-            (
+            ConsensusResponse::new(
                 response.content.id,
                 match response.content.content {
                     CanisterHttpResponseContent::Success(data) => Payload::Data(data),
@@ -660,11 +664,11 @@ impl IntoMessages<(Vec<Response>, CanisterHttpBatchStats)> for CanisterHttpPaylo
             )
         });
 
-        let timeouts = messages.timeouts.iter().map(|timeout| {
+        let timeouts = messages.timeouts.iter().map(|callback| {
             // Map timeouts to a rejected response
             stats.timeouts += 1;
-            (
-                *timeout,
+            ConsensusResponse::new(
+                *callback,
                 Payload::Reject(RejectContext::new(
                     RejectCode::SysTransient,
                     "Canister http request timed out",
@@ -675,12 +679,12 @@ impl IntoMessages<(Vec<Response>, CanisterHttpBatchStats)> for CanisterHttpPaylo
         let divergece_responses = messages.divergence_responses.iter().filter_map(|response| {
             // NOTE: We skip delivering the divergence response, if it has no shares
             // Such a divergence response should never validate, therefore this should never happen
-            // However, if it where ever to happen, we can ignore it here/
+            // However, if it where ever to happen, we can ignore it here.
             // This is sound, since eventually a timeout will end the outstanding callback anyway.
             response.shares.first().map(|share| {
                 // Map divergence responses to reject response
                 stats.divergence_responses += 1;
-                (
+                ConsensusResponse::new(
                     share.content.id,
                     Payload::Reject(RejectContext::new(
                         RejectCode::SysTransient,
@@ -695,15 +699,6 @@ impl IntoMessages<(Vec<Response>, CanisterHttpBatchStats)> for CanisterHttpPaylo
         let responses = responses
             .chain(timeouts)
             .chain(divergece_responses)
-            .map(|(id, response)| Response {
-                // Wrap the id and response payload into a response
-                // NOTE originator and respondent are not needed for these types of calls
-                originator: CanisterId::ic_00(),
-                respondent: CanisterId::ic_00(),
-                originator_reply_callback: id,
-                refund: Cycles::zero(),
-                response_payload: response,
-            })
             .collect();
 
         (responses, stats)

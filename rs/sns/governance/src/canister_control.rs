@@ -89,19 +89,18 @@ async fn install_code(
     wasm: Vec<u8>,
     arg: Vec<u8>,
 ) -> Result<(), GovernanceError> {
-    let install_code_args = ic_ic00_types::InstallCodeArgs {
-        mode: ic_ic00_types::CanisterInstallMode::Upgrade,
+    let install_code_args = ic_management_canister_types::InstallCodeArgs {
+        mode: ic_management_canister_types::CanisterInstallMode::Upgrade,
         canister_id: canister_id.get(),
         wasm_module: wasm,
         arg,
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: env.canister_version(),
     };
 
     env.call_canister(
-        ic_ic00_types::IC_00,
+        ic_management_canister_types::IC_00,
         "install_code",
         Encode!(&install_code_args).expect("Unable to encode install_code args."),
     )

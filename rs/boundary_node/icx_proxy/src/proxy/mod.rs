@@ -2,8 +2,11 @@ use std::{fs, net::SocketAddr, os::unix::fs::PermissionsExt, path::PathBuf, sync
 
 use anyhow::{Context, Error};
 use axum::{handler::Handler, middleware, Router};
+use http::Request;
+use hyper::body::Incoming;
 use hyper::{self, Response, StatusCode, Uri};
-use hyperlocal::UnixServerExt;
+use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::TokioIo;
 use ic_agent::agent::{
     http_transport::{
         hyper_transport::HyperReplicaV2Transport,
@@ -12,6 +15,9 @@ use ic_agent::agent::{
     Agent, AgentError,
 };
 use opentelemetry::metrics::Meter;
+use std::convert::Infallible;
+use tokio::net::UnixListener;
+use tower::Service;
 use tracing::{error, info, warn, Span};
 use url::Url;
 
@@ -20,11 +26,15 @@ use crate::{
     http_client::{Body, HyperService},
     logging::add_trace_layer,
     metrics::{with_metrics_middleware, HttpMetricParams},
+    proxy::domain_canister::DomainCanisterMatcher,
     validate::Validate,
     DomainAddr,
 };
 
 pub mod agent;
+pub mod denylist;
+pub mod domain_canister;
+pub mod geoip;
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
@@ -57,7 +67,8 @@ pub struct ProxyOpts {
     pub root_key: Option<PathBuf>,
 }
 
-use agent::{handler as agent_handler, Pool};
+pub use agent::{handler as agent_handler, Pool};
+
 trait HandleError {
     type B;
     fn handle_error(self, debug: bool) -> Response<Self::B>;
@@ -103,6 +114,9 @@ where
 
 pub struct SetupArgs<V, C> {
     pub validator: V,
+    pub domain_match: Option<Arc<DomainCanisterMatcher>>,
+    pub geoip: Option<Arc<geoip::GeoIp>>,
+    pub denylist: Option<Arc<denylist::Denylist>>,
     pub resolver: ResolverState,
     pub client: C,
     pub meter: Meter,
@@ -151,6 +165,9 @@ pub fn setup<C: HyperService<Body> + 'static>(
     let agent_service = agent_handler.with_state(AppState(Arc::new(AppStateInner {
         agent: None,
         replica_pool: Pool::new(replicas),
+        domain_match: args.domain_match,
+        geoip: args.geoip,
+        denylist: args.denylist,
         validator: args.validator,
         resolver: args.resolver,
         debug: opts.debug,
@@ -211,6 +228,9 @@ pub fn setup_unix_socket<C: HyperService<Body> + 'static>(
     let agent_service = agent_handler.with_state(AppState(Arc::new(AppStateInner {
         agent: Some(agent),
         replica_pool: Pool::new(vec![]),
+        domain_match: args.domain_match,
+        geoip: args.geoip,
+        denylist: args.denylist,
         validator: args.validator,
         resolver: args.resolver,
         debug: opts.debug,
@@ -235,6 +255,9 @@ pub struct AppState<V>(Arc<AppStateInner<V>>);
 
 struct AppStateInner<V> {
     agent: Option<Agent>,
+    domain_match: Option<Arc<DomainCanisterMatcher>>,
+    geoip: Option<Arc<geoip::GeoIp>>,
+    denylist: Option<Arc<denylist::Denylist>>,
     replica_pool: Pool,
     resolver: ResolverState,
     validator: V,
@@ -242,6 +265,23 @@ struct AppStateInner<V> {
 }
 
 impl<V> AppState<V> {
+    pub fn new_for_testing(
+        replicas: Vec<(Agent, Uri)>,
+        resolver: ResolverState,
+        validator: V,
+    ) -> Self {
+        Self(Arc::new(AppStateInner {
+            agent: None,
+            domain_match: None,
+            geoip: None,
+            denylist: None,
+            replica_pool: Pool::new(replicas),
+            resolver,
+            validator,
+            debug: true,
+        }))
+    }
+
     pub fn pool(&self) -> &Pool {
         &self.0.replica_pool
     }
@@ -253,6 +293,15 @@ impl<V> AppState<V> {
     }
     pub fn debug(&self) -> bool {
         self.0.debug
+    }
+    pub fn domain_match(&self) -> Option<Arc<DomainCanisterMatcher>> {
+        self.0.domain_match.clone()
+    }
+    pub fn geoip(&self) -> Option<Arc<geoip::GeoIp>> {
+        self.0.geoip.clone()
+    }
+    pub fn denylist(&self) -> Option<Arc<denylist::Denylist>> {
+        self.0.denylist.clone()
     }
 }
 
@@ -274,7 +323,7 @@ impl Runner {
         match self.listen {
             ListenProto::Tcp(x) => {
                 info!("Starting server. Listening on http://{}/", x);
-                axum::Server::bind(&x)
+                axum_server::bind(x)
                     .serve(
                         self.router
                             .into_make_service_with_connect_info::<SocketAddr>(),
@@ -291,17 +340,47 @@ impl Runner {
                     std::fs::remove_file(&x).expect("unable to remove socket");
                 }
 
-                let srv = hyper::Server::bind_unix(&x)
-                    .expect("unable to listen on unix socket")
-                    .serve(self.router.into_make_service());
+                let uds = UnixListener::bind(x.clone()).unwrap();
 
                 std::fs::set_permissions(&x, std::fs::Permissions::from_mode(0o666))
                     .expect("unable to set permissions on socket");
 
-                srv.await.context("failed to start proxy server")?;
+                let mut make_service = self.router.into_make_service();
+
+                // See https://github.com/tokio-rs/axum/blob/main/examples/serve-with-hyper/src/main.rs for
+                // more details about this setup
+                loop {
+                    let (socket, _remote_addr) = uds.accept().await.unwrap();
+
+                    let tower_service = unwrap_infallible(make_service.call(&socket).await);
+
+                    tokio::spawn(async move {
+                        let socket = TokioIo::new(socket);
+
+                        let hyper_service =
+                            hyper::service::service_fn(move |request: Request<Incoming>| {
+                                tower_service.clone().call(request)
+                            });
+
+                        if let Err(err) =
+                            hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                                .serve_connection_with_upgrades(socket, hyper_service)
+                                .await
+                        {
+                            eprintln!("failed to serve connection: {err:#}");
+                        }
+                    });
+                }
             }
         }
 
         Ok(())
+    }
+}
+
+fn unwrap_infallible<T>(result: Result<T, Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(err) => match err {},
     }
 }

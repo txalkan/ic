@@ -28,6 +28,7 @@ DEPENDENCIES = [
     "//rs/ethereum/ledger-suite-orchestrator:ledger_suite_orchestrator",
     "//rs/http_utils",
     "//rs/ic_os/deterministic_ips",
+    "//rs/ic_os/fstrim_tool",
     "//rs/interfaces",
     "//rs/interfaces/registry",
     "//rs/nervous_system/clients",
@@ -91,14 +92,15 @@ DEPENDENCIES = [
     "//rs/test_utilities",
     "//rs/test_utilities/identity",
     "//rs/test_utilities/time",
+    "//rs/test_utilities/types",
     "//rs/tests/test_canisters/message:lib",
     "//rs/tree_deserializer",
     "//rs/types/base_types",
-    "//rs/types/ic00_types",
+    "//rs/types/management_canister_types",
     "//rs/types/types_test_utils",
     "//rs/types/types",
+    "//rs/types/wasm_types",
     "//rs/universal_canister/lib",
-    "//rs/utils",
     "@crate_index//:anyhow",
     "@crate_index//:assert_matches",
     "@crate_index//:assert-json-diff",
@@ -112,14 +114,13 @@ DEPENDENCIES = [
     "@crate_index//:cidr",
     "@crate_index//:clap",
     "@crate_index//:crossbeam-channel",
-    "@crate_index//:crossbeam-utils",
     "@crate_index//:flate2",
     "@crate_index//:futures",
     "@crate_index//:hex",
     "@crate_index//:http",
     "@crate_index//:humantime",
     "@crate_index//:hyper-rustls",
-    "@crate_index//:hyper",
+    "@crate_index//:hyper_0_14_27",
     "@crate_index//:ic-agent",
     "@crate_index//:ic-btc-interface",
     "@crate_index//:ic-cdk",
@@ -145,11 +146,10 @@ DEPENDENCIES = [
     "@crate_index//:rayon",
     "@crate_index//:rcgen",
     "@crate_index//:regex",
-    "@crate_index//:reqwest",
+    "@crate_index//:reqwest_0_11_27",
     "@crate_index//:ring",
     "@crate_index//:rsa",
     "@crate_index//:rust_decimal",
-    "@crate_index//:rustls",
     "@crate_index//:serde_bytes",
     "@crate_index//:serde_cbor",
     "@crate_index//:serde_json",
@@ -159,6 +159,7 @@ DEPENDENCIES = [
     "@crate_index//:slog-term",
     "@crate_index//:slog",
     "@crate_index//:ssh2",
+    "@crate_index//:strum",
     "@crate_index//:tempfile",
     "@crate_index//:thiserror",
     "@crate_index//:time",
@@ -175,6 +176,7 @@ MACRO_DEPENDENCIES = [
     "@crate_index//:async-recursion",
     "@crate_index//:async-trait",
     "@crate_index//:indoc",
+    "@crate_index//:strum_macros",
 ]
 
 GUESTOS_DEV_VERSION = "//ic-os/guestos/envs/dev:version.txt"
@@ -242,9 +244,9 @@ SNS_CANISTER_WASM_PROVIDERS = {
         "tip-of-branch": "//rs/rosetta-api/icrc1/archive:archive_canister",
         "mainnet": "@mainnet_ic-icrc1-archive//file",
     },
-    "ic-icrc1-index": {
-        "tip-of-branch": "//rs/rosetta-api/icrc1/index:index_canister",
-        "mainnet": "@mainnet_ic-icrc1-index//file",
+    "ic-icrc1-index-ng": {
+        "tip-of-branch": "//rs/rosetta-api/icrc1/index-ng:index_ng_canister",
+        "mainnet": "@mainnet_ic-icrc1-index-ng//file",
     },
 }
 
@@ -351,15 +353,10 @@ BOUNDARY_NODE_GUESTOS_RUNTIME_DEPS = [
     "//ic-os/boundary-guestos:scripts/build-bootstrap-config-image.sh",
 ]
 
-BOUNDARY_NODE_GUESTOS_SEV_RUNTIME_DEPS = [
-    "//ic-os/boundary-guestos/envs/dev-sev:disk-img.tar.zst.cas-url",
-    "//ic-os/boundary-guestos/envs/dev-sev:disk-img.tar.zst.sha256",
-]
-
 COUNTER_CANISTER_RUNTIME_DEPS = ["//rs/tests:src/counter.wat"]
 
 CANISTER_HTTP_RUNTIME_DEPS = [
-    "//rs/tests:http_uvm_config_image",
+    "//rs/tests/networking/canister_http:http_uvm_config_image",
 ]
 
 CUSTOM_DOMAINS_RUNTIME_DEPS = [
@@ -401,6 +398,31 @@ def _symlink_dir(ctx):
 
 symlink_dir = rule(
     implementation = _symlink_dir,
+    attrs = {
+        "targets": attr.label_keyed_string_dict(allow_files = True),
+    },
+)
+
+def _symlink_dir_test(ctx):
+    # Use the no-op script as the executable
+    no_op_output = ctx.actions.declare_file("no_op")
+    ctx.actions.write(output = no_op_output, content = ":")
+
+    dirname = ctx.attr.name
+    lns = []
+    for target, canister_name in ctx.attr.targets.items():
+        ln = ctx.actions.declare_file(dirname + "/" + canister_name)
+        file = target[DefaultInfo].files.to_list()[0]
+        ctx.actions.symlink(
+            output = ln,
+            target_file = file,
+        )
+        lns.append(ln)
+    return [DefaultInfo(files = depset(direct = lns), executable = no_op_output)]
+
+symlink_dir_test = rule(
+    implementation = _symlink_dir_test,
+    test = True,
     attrs = {
         "targets": attr.label_keyed_string_dict(allow_files = True),
     },

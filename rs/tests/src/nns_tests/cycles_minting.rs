@@ -26,9 +26,9 @@ use ic_config::subnet_config::CyclesAccountManagerConfig;
 use ic_constants::SMALL_APP_SUBNET_MAX_SIZE;
 use ic_crypto_tree_hash::MixedHashTree;
 use ic_crypto_utils_threshold_sig_der::threshold_sig_public_key_from_der;
-use ic_ic00_types::{CanisterIdRecord, CanisterStatusResult};
 use ic_ledger_core::block::BlockType;
 use ic_ledger_core::tokens::CheckedAdd;
+use ic_management_canister_types::{CanisterIdRecord, CanisterStatusResult};
 use ic_nervous_system_common_test_keys::{
     TEST_NEURON_1_OWNER_KEYPAIR, TEST_USER1_KEYPAIR, TEST_USER1_PRINCIPAL, TEST_USER2_KEYPAIR,
 };
@@ -36,15 +36,11 @@ use ic_nns_common::types::{NeuronId, UpdateIcpXdrConversionRatePayload};
 use ic_nns_constants::{
     CYCLES_MINTING_CANISTER_ID, GOVERNANCE_CANISTER_ID, LEDGER_CANISTER_ID, ROOT_CANISTER_ID,
 };
-use ic_nns_governance::pb::v1::NnsFunction;
-use ic_nns_test_utils::{
-    governance::{
-        submit_external_update_proposal_allowing_error, upgrade_nns_canister_by_proposal,
-    },
-    ids::TEST_NEURON_1_ID,
+use ic_nns_governance::{init::TEST_NEURON_1_ID, pb::v1::NnsFunction};
+use ic_nns_test_utils::governance::{
+    submit_external_update_proposal_allowing_error, upgrade_nns_canister_by_proposal,
 };
 use ic_registry_subnet_type::SubnetType;
-use ic_rosetta_test_utils::make_user_ed25519;
 use ic_types::{CanisterId, Cycles, PrincipalId};
 use icp_ledger::protobuf::TipOfChainRequest;
 use icp_ledger::{
@@ -53,12 +49,23 @@ use icp_ledger::{
     DEFAULT_TRANSFER_FEE,
 };
 use on_wire::{FromWire, IntoWire};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use slog::info;
 use std::sync::atomic::{AtomicU64, Ordering};
 use url::Url;
 
 /// [EXC-1168] Flag to turn on cost scaling according to a subnet replication factor.
 const USE_COST_SCALING_FLAG: bool = true;
+
+fn make_user_ed25519(seed: u64) -> (ic_canister_client_sender::Ed25519KeyPair, PrincipalId) {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let kp = ic_canister_client_sender::Ed25519KeyPair::generate(&mut rng);
+    let public_key_der =
+        ic_canister_client_sender::ed25519_public_key_to_der(kp.public_key.to_vec());
+    let pid = PrincipalId::new_self_authenticating(&public_key_der);
+    (kp, pid)
+}
 
 pub fn config(env: TestEnv) {
     InternetComputer::new()
@@ -132,7 +139,7 @@ pub fn test(env: TestEnv) {
             CYCLES_MINTING_CANISTER_ID,
         );
 
-        let (_acc, controller_user_keypair, _pk, controller_pid) = make_user_ed25519(7);
+        let (controller_user_keypair, controller_pid) = make_user_ed25519(7);
 
         let xdr_permyriad_per_icp = 5_000; // = 0.5 XDR/ICP
         let icpts_to_cycles = TokensToCycles {
@@ -884,7 +891,7 @@ pub fn create_canister_on_specific_subnet_type(env: TestEnv) {
             CYCLES_MINTING_CANISTER_ID,
         );
 
-        let (_acc, controller_user_keypair, _pk, controller_pid) = make_user_ed25519(7);
+        let (controller_user_keypair, controller_pid) = make_user_ed25519(7);
 
         let xdr_permyriad_per_icp = 5_000; // = 0.5 XDR/ICP
 

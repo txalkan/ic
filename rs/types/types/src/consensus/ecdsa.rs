@@ -4,10 +4,10 @@ pub use crate::consensus::ecdsa_refs::{
     unpack_reshare_of_unmasked_params, EcdsaBlockReader, IDkgTranscriptAttributes,
     IDkgTranscriptOperationRef, IDkgTranscriptParamsRef, MaskedTranscript,
     PreSignatureQuadrupleRef, PseudoRandomId, QuadrupleId, QuadrupleInCreation,
-    RandomTranscriptParams, RequestId, ReshareOfMaskedParams, ReshareOfUnmaskedParams,
-    ThresholdEcdsaSigInputsError, ThresholdEcdsaSigInputsRef, TranscriptAttributes,
-    TranscriptCastError, TranscriptLookupError, TranscriptParamsError, TranscriptRef,
-    UnmaskedTimesMaskedParams, UnmaskedTranscript,
+    RandomTranscriptParams, RandomUnmaskedTranscriptParams, RequestId, ReshareOfMaskedParams,
+    ReshareOfUnmaskedParams, ThresholdEcdsaSigInputsError, ThresholdEcdsaSigInputsRef,
+    TranscriptAttributes, TranscriptCastError, TranscriptLookupError, TranscriptParamsError,
+    TranscriptRef, UnmaskedTimesMaskedParams, UnmaskedTranscript,
 };
 use crate::{
     consensus::BasicSignature,
@@ -28,11 +28,10 @@ use crate::{
 use ic_crypto_sha2::Sha256;
 #[cfg(test)]
 use ic_exhaustive_derive::ExhaustiveSet;
-use ic_ic00_types::EcdsaKeyId;
+use ic_management_canister_types::{EcdsaKeyId, MasterPublicKeyId};
 use ic_protobuf::{
     proxy::{try_from_option_field, ProxyDecodeError},
-    registry::crypto::v1 as crypto_pb,
-    registry::subnet::v1 as subnet_pb,
+    registry::{crypto::v1 as crypto_pb, subnet::v1 as subnet_pb},
     types::v1 as pb,
 };
 use phantom_newtype::Id;
@@ -41,18 +40,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     convert::{TryFrom, TryInto},
     fmt::{self, Display, Formatter},
-    hash::Hash,
+    hash::{Hash, Hasher},
     time::Duration,
 };
 use strum_macros::EnumIter;
-
-/// This feature flag enables the reduced latency path through payload
-/// builder and signer components. Instead of matching pre-signatures
-/// with requests in the block payload, and generating signature shares
-/// once that block is finalized, the optimized path matches pre-signatures
-/// with requests in replicated state and generates signature shares as
-/// soon as that state is certified.
-pub const ECDSA_IMPROVED_LATENCY: bool = false;
 
 /// For completed signature requests, we differentiate between those
 /// that have already been reported and those that have not. This is
@@ -61,7 +52,7 @@ pub const ECDSA_IMPROVED_LATENCY: bool = false;
 #[cfg_attr(test, derive(ExhaustiveSet))]
 pub enum CompletedSignature {
     ReportedToExecution,
-    Unreported(crate::messages::Response),
+    Unreported(crate::batch::ConsensusResponse),
 }
 
 /// Common data that is carried in both `EcdsaSummaryPayload` and `EcdsaDataPayload`.
@@ -73,8 +64,8 @@ pub struct EcdsaPayload {
     /// Collection of completed signatures.
     pub signature_agreements: BTreeMap<PseudoRandomId, CompletedSignature>,
 
-    /// The `RequestIds` for which we are currently generating signatures.
-    pub ongoing_signatures: BTreeMap<RequestId, ThresholdEcdsaSigInputsRef>,
+    /// DEPRECATED: The `RequestIds` for which we are currently generating signatures.
+    pub deprecated_ongoing_signatures: BTreeMap<RequestId, ThresholdEcdsaSigInputsRef>,
 
     /// ECDSA transcript quadruples that we can use to create ECDSA signatures.
     pub available_quadruples: BTreeMap<QuadrupleId, PreSignatureQuadrupleRef>,
@@ -144,12 +135,6 @@ impl EcdsaPayload {
         }
     }
 
-    /// Return an iterator of all request ids that are used in the payload.
-    /// Note that it doesn't guarantee any ordering.
-    pub fn iter_request_ids(&self) -> Box<dyn Iterator<Item = &RequestId> + '_> {
-        Box::new(self.ongoing_signatures.keys())
-    }
-
     /// Return an iterator of all ids of quadruples in the payload.
     pub fn iter_quadruple_ids(&self) -> Box<dyn Iterator<Item = QuadrupleId> + '_> {
         Box::new(
@@ -157,24 +142,6 @@ impl EcdsaPayload {
                 .keys()
                 .chain(self.quadruples_in_creation.keys())
                 .cloned(),
-        )
-    }
-    /// Return an iterator of all unassigned quadruple ids that is used in the payload.
-    /// A quadruple id is assigned if it already paired with a signature request i.e.
-    /// there exists a request id (in ongoing signatures) that contains this quadruple id.
-    ///
-    /// Note that under proper payload construction, the quadruples paired with requests
-    /// in ongoing_signatures should always be disjoint with the set of available and
-    /// ongoing quadruples. This function is offered here as a safer alternative.
-    pub fn unassigned_quadruple_ids(&self) -> Box<dyn Iterator<Item = QuadrupleId> + '_> {
-        let assigned = self
-            .iter_request_ids()
-            .cloned()
-            .map(|id| id.quadruple_id)
-            .collect::<BTreeSet<_>>();
-        Box::new(
-            self.iter_quadruple_ids()
-                .filter(move |id| !assigned.contains(id)),
         )
     }
 
@@ -186,9 +153,6 @@ impl EcdsaPayload {
                 active_refs.insert(r);
             })
         };
-        for obj in self.ongoing_signatures.values() {
-            insert(obj.get_refs())
-        }
         for obj in self.available_quadruples.values() {
             insert(obj.get_refs())
         }
@@ -204,9 +168,6 @@ impl EcdsaPayload {
 
     /// Updates the height of all the transcript refs to the given height.
     pub fn update_refs(&mut self, height: Height) {
-        for obj in self.ongoing_signatures.values_mut() {
-            obj.update(height);
-        }
         for obj in self.available_quadruples.values_mut() {
             obj.update(height);
         }
@@ -252,18 +213,7 @@ impl EcdsaPayload {
                 .get(&transcript.as_ref().transcript_id)
                 .map(|transcript| transcript.registry_version),
         };
-        let mut registry_version = min_version(key_version, in_creation_version);
-        for (_, sig_input_ref) in self.ongoing_signatures.iter() {
-            for r in sig_input_ref.get_refs().iter() {
-                registry_version = min_version(
-                    registry_version,
-                    idkg_transcripts
-                        .get(&r.transcript_id)
-                        .map(|transcript| transcript.registry_version),
-                );
-            }
-        }
-        registry_version
+        min_version(key_version, in_creation_version)
     }
 
     /// Returns the initial DKG dealings being used to bootstrap the target subnet,
@@ -624,12 +574,29 @@ impl TryFrom<&pb::KeyTranscriptCreation> for KeyTranscriptCreation {
 }
 
 /// Internal format of the resharing request from execution.
-#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize, Hash)]
-#[cfg_attr(test, derive(ExhaustiveSet))]
+#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EcdsaReshareRequest {
     pub key_id: EcdsaKeyId,
+    pub master_key_id: Option<MasterPublicKeyId>,
     pub receiving_node_ids: Vec<NodeId>,
     pub registry_version: RegistryVersion,
+}
+
+impl Hash for EcdsaReshareRequest {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let EcdsaReshareRequest {
+            key_id,
+            master_key_id,
+            receiving_node_ids,
+            registry_version,
+        } = self;
+        key_id.hash(state);
+        if let Some(master_key_id) = master_key_id {
+            master_key_id.hash(state);
+        }
+        receiving_node_ids.hash(state);
+        registry_version.hash(state);
+    }
 }
 
 impl From<&EcdsaReshareRequest> for pb::EcdsaReshareRequest {
@@ -640,6 +607,7 @@ impl From<&EcdsaReshareRequest> for pb::EcdsaReshareRequest {
         }
         Self {
             key_id: Some((&request.key_id).into()),
+            master_key_id: request.master_key_id.clone().map(|key_id| key_id.into()),
             receiving_node_ids,
             registry_version: request.registry_version.get(),
         }
@@ -656,8 +624,14 @@ impl TryFrom<&pb::EcdsaReshareRequest> for EcdsaReshareRequest {
             .collect::<Result<Vec<_>, ProxyDecodeError>>()?;
 
         let key_id = try_from_option_field(request.key_id.clone(), "EcdsaReshareRequest::key_id")?;
+        let master_key_id = request
+            .master_key_id
+            .clone()
+            .map(|key_id| key_id.try_into())
+            .transpose()?;
         Ok(Self {
             key_id,
+            master_key_id,
             receiving_node_ids,
             registry_version: RegistryVersion::new(request.registry_version),
         })
@@ -668,7 +642,7 @@ impl TryFrom<&pb::EcdsaReshareRequest> for EcdsaReshareRequest {
 #[cfg_attr(test, derive(ExhaustiveSet))]
 pub enum CompletedReshareRequest {
     ReportedToExecution,
-    Unreported(crate::messages::Response),
+    Unreported(crate::batch::ConsensusResponse),
 }
 
 /// To make sure all ids used in ECDSA payload are uniquely generated,
@@ -699,11 +673,11 @@ impl EcdsaUIDGenerator {
         id
     }
 
-    pub fn next_quadruple_id(&mut self, key_id: EcdsaKeyId) -> QuadrupleId {
+    pub fn next_quadruple_id(&mut self) -> QuadrupleId {
         let id = self.next_unused_quadruple_id;
         self.next_unused_quadruple_id += 1;
 
-        QuadrupleId(id, Some(key_id))
+        QuadrupleId::new(id)
     }
 }
 
@@ -1442,7 +1416,7 @@ impl From<&EcdsaPayload> for pb::EcdsaPayload {
 
         // ongoing_signatures
         let mut ongoing_signatures = Vec::new();
-        for (request_id, ongoing) in &payload.ongoing_signatures {
+        for (request_id, ongoing) in &payload.deprecated_ongoing_signatures {
             ongoing_signatures.push(pb::OngoingSignature {
                 request_id: Some(request_id.clone().into()),
                 sig_inputs: Some(ongoing.into()),
@@ -1569,7 +1543,7 @@ impl TryFrom<&pb::EcdsaPayload> for EcdsaPayload {
             };
 
             let signature = if let Some(unreported) = &completed_signature.unreported {
-                let response = crate::messages::Response::try_from(unreported.clone())?;
+                let response = crate::batch::ConsensusResponse::try_from(unreported.clone())?;
                 CompletedSignature::Unreported(response)
             } else {
                 CompletedSignature::ReportedToExecution
@@ -1579,7 +1553,7 @@ impl TryFrom<&pb::EcdsaPayload> for EcdsaPayload {
         }
 
         // ongoing_signatures
-        let mut ongoing_signatures = BTreeMap::new();
+        let mut deprecated_ongoing_signatures = BTreeMap::new();
         for ongoing_signature in &payload.ongoing_signatures {
             let request_id: RequestId = try_from_option_field(
                 ongoing_signature.request_id.as_ref(),
@@ -1590,7 +1564,7 @@ impl TryFrom<&pb::EcdsaPayload> for EcdsaPayload {
                 ongoing_signature.sig_inputs.as_ref(),
                 "EcdsaPayload::ongoing_signature::sig_inputs",
             )?;
-            ongoing_signatures.insert(request_id, sig_inputs);
+            deprecated_ongoing_signatures.insert(request_id, sig_inputs);
         }
 
         // available_quadruples
@@ -1686,7 +1660,7 @@ impl TryFrom<&pb::EcdsaPayload> for EcdsaPayload {
 
         Ok(Self {
             signature_agreements,
-            ongoing_signatures,
+            deprecated_ongoing_signatures,
             available_quadruples,
             quadruples_in_creation,
             idkg_transcripts,
@@ -1736,37 +1710,13 @@ pub trait EcdsaStats: Send + Sync {
     );
 
     /// Updates the set of signature requests being tracked currently.
-    fn update_active_signature_requests(&self, block_reader: &dyn EcdsaBlockReader);
+    fn update_active_signature_requests(&self, requests: Vec<RequestId>);
 
     /// Records the time taken to verify the signature share received for a request.
     fn record_sig_share_validation(&self, request_id: &RequestId, duration: Duration);
 
     /// Records the time taken to aggregate the signature shares for a request.
     fn record_sig_share_aggregation(&self, request_id: &RequestId, duration: Duration);
-}
-
-/// For testing
-pub struct EcdsaStatsNoOp {}
-impl EcdsaStats for EcdsaStatsNoOp {
-    fn update_active_transcripts(&self, _block_reader: &dyn EcdsaBlockReader) {}
-    fn update_active_quadruples(&self, _block_reader: &dyn EcdsaBlockReader) {}
-    fn record_support_validation(&self, _support: &IDkgDealingSupport, _duration: Duration) {}
-    fn record_support_aggregation(
-        &self,
-        _transcript_params: &IDkgTranscriptParams,
-        _support_shares: &[IDkgDealingSupport],
-        _duration: Duration,
-    ) {
-    }
-    fn record_transcript_creation(
-        &self,
-        _transcript_params: &IDkgTranscriptParams,
-        _duration: Duration,
-    ) {
-    }
-    fn update_active_signature_requests(&self, _block_reader: &dyn EcdsaBlockReader) {}
-    fn record_sig_share_validation(&self, _request_id: &RequestId, _duration: Duration) {}
-    fn record_sig_share_aggregation(&self, _request_id: &RequestId, _duration: Duration) {}
 }
 
 /// EcdsaObject should be implemented by the ECDSA message types
@@ -1900,33 +1850,12 @@ mod tests {
         let mut uid_generator =
             EcdsaUIDGenerator::new(ic_types_test_utils::ids::SUBNET_0, Height::new(100));
 
-        let quadruple_id_0 = uid_generator.next_quadruple_id(fake_ecdsa_key_id("key_id_0"));
-        let quadruple_id_1 = uid_generator.next_quadruple_id(fake_ecdsa_key_id("key_id_1"));
-        let quadruple_id_2 = uid_generator.next_quadruple_id(fake_ecdsa_key_id("key_id_2"));
+        let quadruple_id_0 = uid_generator.next_quadruple_id();
+        let quadruple_id_1 = uid_generator.next_quadruple_id();
+        let quadruple_id_2 = uid_generator.next_quadruple_id();
 
         assert_eq!(quadruple_id_0.id(), 0);
         assert_eq!(quadruple_id_1.id(), 1);
         assert_eq!(quadruple_id_2.id(), 2);
-    }
-
-    #[test]
-    fn uid_generator_quadruple_id_test() {
-        let key_id_1 = fake_ecdsa_key_id("key_id_1");
-        let key_id_2 = fake_ecdsa_key_id("key_id_2");
-        let mut uid_generator =
-            EcdsaUIDGenerator::new(ic_types_test_utils::ids::SUBNET_0, Height::new(100));
-
-        let quadruple_id_0 = uid_generator.next_quadruple_id(key_id_1.clone());
-        let quadruple_id_1 = uid_generator.next_quadruple_id(key_id_2.clone());
-
-        assert_eq!(quadruple_id_0.key_id(), Some(&key_id_1));
-        assert_eq!(quadruple_id_1.key_id(), Some(&key_id_2));
-    }
-
-    fn fake_ecdsa_key_id(name: &str) -> EcdsaKeyId {
-        EcdsaKeyId {
-            curve: ic_ic00_types::EcdsaCurve::Secp256k1,
-            name: name.to_string(),
-        }
     }
 }

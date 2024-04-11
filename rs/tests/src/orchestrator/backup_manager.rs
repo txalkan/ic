@@ -118,6 +118,7 @@ pub fn test(env: TestEnv) {
     copy_file(&binaries_path, &backup_binaries_dir, "ic-replay");
     copy_file(&binaries_path, &backup_binaries_dir, "sandbox_launcher");
     copy_file(&binaries_path, &backup_binaries_dir, "canister_sandbox");
+    copy_file(&binaries_path, &backup_binaries_dir, "compiler_sandbox");
 
     info!(
         log,
@@ -404,6 +405,7 @@ fn modify_byte_in_file(file_path: PathBuf) -> std::io::Result<()> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(file_path)?;
     file.seek(SeekFrom::Start(0))?;
     let mut byte: [u8; 1] = [0];

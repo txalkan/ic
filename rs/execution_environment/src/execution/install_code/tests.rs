@@ -10,7 +10,8 @@ use ic_types::{
     CanisterId, ComputeAllocation, Cycles, MemoryAllocation, NumBytes, NumInstructions,
 };
 
-use ic_ic00_types::{
+use ic_management_canister_types::InstallChunkedCodeArgsLegacy;
+use ic_management_canister_types::{
     CanisterChange, CanisterChangeDetails, CanisterChangeOrigin, CanisterInstallMode,
     CanisterInstallModeV2, EmptyBlob, InstallChunkedCodeArgs, InstallCodeArgs, InstallCodeArgsV2,
     Method, Payload, UploadChunkArgs, UploadChunkReply,
@@ -111,7 +112,6 @@ fn dts_resume_works_in_install_code() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
     let original_system_state = test.canister_state(canister_id).system_state.clone();
@@ -161,7 +161,6 @@ fn dts_abort_works_in_install_code() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
     let original_system_state = test.canister_state(canister_id).system_state.clone();
@@ -238,7 +237,6 @@ fn install_code_validate_input_compute_allocation() {
         arg: vec![],
         compute_allocation: Some(candid::Nat::from(90u64)),
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -288,7 +286,6 @@ fn install_code_validate_input_memory_allocation() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: Some(candid::Nat::from(260 * mib)),
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -327,7 +324,6 @@ fn install_code_validate_input_controller() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -366,7 +362,6 @@ fn install_code_validates_execution_state() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -411,7 +406,6 @@ fn install_code_fails_when_not_enough_wasm_custom_sections_memory() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -441,7 +435,6 @@ fn install_code_succeeds_with_enough_wasm_custom_sections_memory() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -486,7 +479,6 @@ fn install_code_respects_wasm_custom_sections_available_memory() {
             arg: vec![],
             compute_allocation: None,
             memory_allocation: None,
-            query_allocation: None,
             sender_canister_version: None,
         };
 
@@ -514,7 +506,6 @@ fn install_code_respects_wasm_custom_sections_available_memory() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
     let result = test.subnet_message(Method::InstallCode, payload.encode());
@@ -538,7 +529,6 @@ fn execute_install_code_message_dts_helper(
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -652,7 +642,6 @@ fn start_install_code_dts(
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -778,7 +767,6 @@ fn reserve_cycles_for_execution_fails_when_not_enough_cycles() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
     let original_balance = test.canister_state(canister_id).system_state.balance();
@@ -825,7 +813,6 @@ fn install_code_running_out_of_instructions() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -935,7 +922,6 @@ fn dts_install_code_creates_entry_in_subnet_call_context_manager() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -1015,7 +1001,6 @@ fn subnet_call_context_manager_keeps_install_code_requests_when_abort() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -1408,7 +1393,6 @@ fn install_code_args(canister_id: CanisterId) -> InstallCodeArgs {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     }
 }
@@ -1627,6 +1611,55 @@ fn install_chunked_works_from_other_canister() {
         test.subnet_message(
             "install_chunked_code",
             InstallChunkedCodeArgs::new(
+                CanisterInstallModeV2::Install,
+                target_canister,
+                Some(store_canister),
+                vec![hash.clone()],
+                hash,
+                vec![],
+            )
+            .encode(),
+        ),
+    );
+
+    // Check the canister is working
+    let wasm = ic_universal_canister::wasm().reply().build();
+
+    let result = test.ingress(target_canister, "update", wasm);
+    assert_matches!(result, Ok(WasmResult::Reply(_)));
+}
+
+#[test]
+fn install_chunked_works_with_legacy_args() {
+    const CYCLES: Cycles = Cycles::new(1_000_000_000_000_000);
+
+    let mut test = ExecutionTestBuilder::new()
+        .with_wasm_chunk_store(FlagStatus::Enabled)
+        .build();
+
+    let target_canister = test.create_canister(CYCLES);
+    let store_canister = test.create_canister(CYCLES);
+
+    // Upload universal canister chunk.
+    let uc_wasm = UNIVERSAL_CANISTER_WASM;
+    let hash = UploadChunkReply::decode(&get_reply(
+        test.subnet_message(
+            "upload_chunk",
+            UploadChunkArgs {
+                canister_id: store_canister.into(),
+                chunk: uc_wasm.to_vec(),
+            }
+            .encode(),
+        ),
+    ))
+    .unwrap()
+    .hash;
+
+    // Install the universal canister using legacy args.
+    let _install_response = get_reply(
+        test.subnet_message(
+            "install_chunked_code",
+            InstallChunkedCodeArgsLegacy::new(
                 CanisterInstallModeV2::Install,
                 target_canister,
                 Some(store_canister),
@@ -1985,7 +2018,6 @@ fn install_with_dts_correctly_updates_system_state() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -2044,7 +2076,6 @@ fn install_with_dts_correctly_updates_system_state() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -2114,7 +2145,6 @@ fn upgrade_with_dts_correctly_updates_system_state() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -2173,7 +2203,6 @@ fn upgrade_with_dts_correctly_updates_system_state() {
         arg: vec![],
         compute_allocation: None,
         memory_allocation: None,
-        query_allocation: None,
         sender_canister_version: None,
     };
 
@@ -2304,7 +2333,6 @@ fn successful_install_chunked_charges_for_wasm_assembly() {
             canister_id,
             wasm.clone(),
             vec![],
-            None,
             None,
             None,
         )

@@ -27,7 +27,7 @@ use ic_system_api::SystemApiImpl;
 /// The amount of instructions required to process a single byte in a payload.
 /// This includes the cost of memory as well as time passing the payload
 /// from wasm sandbox to the replica execution environment.
-const INSTRUCTIONS_PER_BYTE_CONVERSION_FACTOR: u32 = 50;
+const BYTE_TRANSMISSION_COST_FACTOR: u32 = 50;
 
 fn unexpected_err(s: String) -> HypervisorError {
     HypervisorError::WasmEngineError(WasmEngineError::Unexpected(s))
@@ -352,6 +352,42 @@ pub(crate) fn syscalls(
             .map_err(|e| process_err(&mut caller, e))
     }
 
+    /// Check if debug print is enabled.
+    fn debug_print_is_enabled(
+        caller: &mut Caller<'_, StoreData>,
+        feature_flags: FeatureFlags,
+    ) -> Result<bool, anyhow::Error> {
+        match (
+            feature_flags.rate_limiting_of_debug_prints,
+            with_system_api(caller, |s| Ok(s.subnet_type()))?,
+        ) {
+            // Debug print is enabled if rate limiting is off or for system subnets.
+            (FlagStatus::Disabled, _) | (_, SubnetType::System) => Ok(true),
+            // Disabled otherwise.
+            _ => Ok(false),
+        }
+    }
+
+    /// Calculate logging charge bytes based on message size and remaining space in canister log.
+    fn logging_charge_bytes(
+        caller: &mut Caller<'_, StoreData>,
+        message_num_bytes: u64,
+    ) -> Result<u64, anyhow::Error> {
+        let capacity = with_system_api(caller, |s| Ok(s.canister_log().capacity()))?;
+        let remaining_space = with_system_api(caller, |s| Ok(s.canister_log().remaining_space()))?;
+        let allocated_num_bytes = message_num_bytes.min(capacity as u64);
+        let transmitted_num_bytes = message_num_bytes.min(remaining_space as u64);
+        // LINT.IfChange
+        // The cost of logging is proportional to the size of the message, but is limited
+        // by the log capacity and the remaining space in the log.
+        // The cost is calculated as follows:
+        // - the allocated bytes (x2 to account for adding new message and removing the oldest one)
+        //   - this must be in sync with `CanisterLog::add_record()` from `ic_management_canister_types`
+        // - the transmitted bytes (multiplied by the cost factor) for sending the payload to the replica.
+        Ok(2 * allocated_num_bytes + BYTE_TRANSMISSION_COST_FACTOR as u64 * transmitted_num_bytes)
+        // LINT.ThenChange(logging_charge_bytes_rule)
+    }
+
     linker
         .func_wrap("ic0", "msg_caller_copy", {
             move |mut caller: Caller<'_, StoreData>, dst: u32, offset: u32, size: u32| {
@@ -466,7 +502,7 @@ pub(crate) fn syscalls(
                 charge_for_cpu_and_mem(
                     &mut caller,
                     overhead!(MSG_REPLY_DATA_APPEND, metering_type),
-                    (INSTRUCTIONS_PER_BYTE_CONVERSION_FACTOR * size) as u64,
+                    (BYTE_TRANSMISSION_COST_FACTOR * size) as u64,
                 )?;
                 with_memory_and_system_api(&mut caller, |system_api, memory| {
                     system_api.ic0_msg_reply_data_append(src, size, memory)
@@ -499,7 +535,7 @@ pub(crate) fn syscalls(
                 charge_for_cpu_and_mem(
                     &mut caller,
                     overhead!(MSG_REJECT, metering_type),
-                    (INSTRUCTIONS_PER_BYTE_CONVERSION_FACTOR * size) as u64,
+                    (BYTE_TRANSMISSION_COST_FACTOR * size) as u64,
                 )?;
                 with_memory_and_system_api(&mut caller, |system_api, memory| {
                     system_api.ic0_msg_reject(src, size, memory)
@@ -577,26 +613,34 @@ pub(crate) fn syscalls(
     linker
         .func_wrap("ic0", "debug_print", {
             move |mut caller: Caller<'_, StoreData>, offset: u32, length: u32| {
+                let mut num_bytes = 0;
+                let canister_logging_is_enabled =
+                    feature_flags.canister_logging == FlagStatus::Enabled;
+                if canister_logging_is_enabled {
+                    num_bytes += logging_charge_bytes(&mut caller, length as u64)?
+                }
+                let debug_print_is_enabled = debug_print_is_enabled(&mut caller, feature_flags)?;
+                if debug_print_is_enabled {
+                    num_bytes += length as u64;
+                }
                 charge_for_cpu_and_mem(
                     &mut caller,
                     overhead!(DEBUG_PRINT, metering_type),
-                    length as u64,
+                    num_bytes,
                 )?;
-                match (
-                    caller.data().system_api.as_ref().unwrap().subnet_type(),
-                    feature_flags.rate_limiting_of_debug_prints,
-                ) {
-                    // Debug print is a no-op on non-system subnets with rate limiting.
-                    (SubnetType::Application, FlagStatus::Enabled) => Ok(()),
-                    (SubnetType::VerifiedApplication, FlagStatus::Enabled) => Ok(()),
-                    // If rate limiting is disabled or the subnet is a system subnet, then
-                    // debug print produces output.
-                    (_, FlagStatus::Disabled) | (SubnetType::System, FlagStatus::Enabled) => {
-                        with_memory_and_system_api(&mut caller, |system_api, memory| {
-                            system_api.ic0_debug_print(offset, length, memory)
-                        })
+                with_memory_and_system_api(&mut caller, |system_api, memory| {
+                    system_api.save_log_message(
+                        canister_logging_is_enabled,
+                        offset,
+                        length,
+                        memory,
+                    );
+                    if debug_print_is_enabled {
+                        system_api.ic0_debug_print(offset, length, memory)
+                    } else {
+                        Ok(())
                     }
-                }
+                })
             }
         })
         .unwrap();
@@ -651,7 +695,7 @@ pub(crate) fn syscalls(
                 charge_for_cpu_and_mem(
                     &mut caller,
                     overhead!(CALL_DATA_APPEND, metering_type),
-                    (INSTRUCTIONS_PER_BYTE_CONVERSION_FACTOR * size) as u64,
+                    (BYTE_TRANSMISSION_COST_FACTOR * size) as u64,
                 )?;
                 with_memory_and_system_api(&mut caller, |system_api, memory| {
                     system_api.ic0_call_data_append(src, size, memory)
@@ -1013,16 +1057,14 @@ pub(crate) fn syscalls(
         .unwrap();
 
     linker
-        .func_wrap("__", "update_available_memory", {
+        .func_wrap("__", "try_grow_wasm_memory", {
             move |mut caller: Caller<'_, StoreData>,
                   native_memory_grow_res: i32,
-                  additional_elements: u32,
-                  element_size: u32| {
+                  additional_wasm_pages: u32| {
                 with_system_api(&mut caller, |s| {
-                    s.update_available_memory(
+                    s.try_grow_wasm_memory(
                         native_memory_grow_res as i64,
-                        additional_elements as u64,
-                        element_size as u64,
+                        additional_wasm_pages as u64,
                     )
                 })
                 .map(|()| native_memory_grow_res)

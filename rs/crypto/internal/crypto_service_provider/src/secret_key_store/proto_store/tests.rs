@@ -10,6 +10,7 @@ use assert_matches::assert_matches;
 use ic_crypto_internal_basic_sig_ed25519::types as ed25519_types;
 use ic_crypto_internal_csp_test_utils::files::mk_temp_dir_with_permissions;
 use ic_crypto_internal_multi_sig_bls12381::types::SecretKeyBytes;
+use ic_crypto_internal_threshold_sig_bls12381::ni_dkg::types::CspFsEncryptionKeySet;
 use ic_crypto_internal_threshold_sig_ecdsa::{
     EccCurveType, MEGaKeySetK256Bytes, MEGaPrivateKey, MEGaPrivateKeyK256Bytes, MEGaPublicKey,
     MEGaPublicKeyK256Bytes,
@@ -68,6 +69,7 @@ fn should_not_leak_any_data_on_protobuf_deserialization_error_when_opening_key_s
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(temp_dir.path().join(sks_file_name))
         .unwrap();
     use std::os::unix::fs::FileExt;

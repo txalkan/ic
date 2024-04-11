@@ -197,6 +197,7 @@ impl StreamBuilderImpl {
                             MR_SYNTHETIC_REJECT_MESSAGE_MAX_LEN,
                         ),
                     ),
+                    deadline: req.deadline,
                 }
                 .into(),
                 // Arbitrary large amount, pushing a response always returns memory.
@@ -326,14 +327,14 @@ impl StreamBuilderImpl {
 
             match routing_table.route(queue_id.dst_canister.get()) {
                 // Destination subnet found.
-                Some(dst_net_id) => {
+                Some(dst_subnet_id) => {
                     if is_at_limit(
-                        streams.get(&dst_net_id),
+                        streams.get(&dst_subnet_id),
                         max_stream_messages,
                         target_stream_size_bytes,
-                        self.subnet_id == dst_net_id,
+                        self.subnet_id == dst_subnet_id,
                         *subnet_types
-                            .get(&dst_net_id)
+                            .get(&dst_subnet_id)
                             .unwrap_or(&SubnetType::Application),
                     ) {
                         // Stream full, skip all other messages to this destination.
@@ -349,7 +350,7 @@ impl StreamBuilderImpl {
                     match msg {
                         // Remote request above the payload size limit.
                         RequestOrResponse::Request(req)
-                            if dst_net_id != self.subnet_id
+                            if dst_subnet_id != self.subnet_id
                                 && req.payload_size_bytes()
                                     > MAX_INTER_CANISTER_PAYLOAD_IN_BYTES =>
                         {
@@ -401,14 +402,14 @@ impl StreamBuilderImpl {
                                 }
                             }
 
-                            streams.push(dst_net_id, msg);
+                            streams.push(dst_subnet_id, msg);
                         }
 
                         _ => {
                             // Route the message into the stream.
                             self.observe_message_status(&msg, LABEL_VALUE_STATUS_SUCCESS);
                             self.observe_payload_size(&msg);
-                            streams.push(dst_net_id, msg);
+                            streams.push(dst_subnet_id, msg);
                         }
                     };
                 }

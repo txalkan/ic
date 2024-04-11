@@ -2,7 +2,7 @@ use crate::{runtime::Runtime, spawn};
 use candid::{CandidType, Encode};
 use ic_base_types::{CanisterId, PrincipalId};
 use ic_canister_log::{log, Sink};
-use ic_ic00_types::IC_00;
+use ic_management_canister_types::IC_00;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -165,6 +165,9 @@ impl<Rt: Runtime, Wasm: ArchiveCanisterWasm> Archive<Rt, Wasm> {
         self.nodes.len() - 1
     }
 
+    // Return the archives with their respective block ranges
+    // associated. The block ranges are inclusive in both start
+    // and end.
     pub fn index(&self) -> Vec<((u64, u64), CanisterId)> {
         self.nodes_block_ranges
             .iter()
@@ -367,9 +370,9 @@ async fn create_and_initialize_node_canister<Rt: Runtime, Wasm: ArchiveCanisterW
         IC_00,
         "update_settings",
         0,
-        (ic_ic00_types::UpdateSettingsArgs::new(
+        (ic_management_canister_types::UpdateSettingsArgs::new(
             node_canister_id,
-            ic_ic00_types::CanisterSettingsArgsBuilder::new()
+            ic_management_canister_types::CanisterSettingsArgsBuilder::new()
                 .with_controllers(controller_ids)
                 .build(),
         ),),

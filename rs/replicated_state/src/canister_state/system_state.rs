@@ -10,8 +10,10 @@ use crate::page_map::PageAllocatorFileDescriptor;
 use crate::{CanisterQueues, CanisterState, InputQueueType, PageMap, StateError};
 pub use call_context_manager::{CallContext, CallContextAction, CallContextManager, CallOrigin};
 use ic_base_types::NumSeconds;
-use ic_ic00_types::{CanisterChange, CanisterChangeDetails, CanisterChangeOrigin, LogVisibility};
 use ic_logger::{error, ReplicaLogger};
+use ic_management_canister_types::{
+    CanisterChange, CanisterChangeDetails, CanisterChangeOrigin, CanisterLog, LogVisibility,
+};
 use ic_protobuf::{
     proxy::{try_from_option_field, ProxyDecodeError},
     state::canister_state_bits::v1 as pb,
@@ -24,7 +26,7 @@ use ic_types::{
         Request, RequestOrResponse, Response, StopCanisterContext,
     },
     nominal_cycles::NominalCycles,
-    CanisterId, CanisterTimer, Cycles, MemoryAllocation, NumBytes, PrincipalId, Time,
+    CanisterId, CanisterTimer, Cycles, MemoryAllocation, NumBytes, PrincipalId, SnapshotId, Time,
 };
 use lazy_static::lazy_static;
 use maplit::btreeset;
@@ -279,7 +281,7 @@ pub struct SystemState {
     /// empty blob.
     ///
     /// See also:
-    ///   * https://sdk.dfinity.org/docs/interface-spec/index.html#system-api-certified-data
+    ///   * https://internetcomputer.org/docs/current/references/ic-interface-spec#system-api-certified-data
     pub certified_data: Vec<u8>,
     pub canister_metrics: CanisterMetrics,
 
@@ -334,6 +336,21 @@ pub struct SystemState {
 
     /// Log visibility of the canister.
     pub log_visibility: LogVisibility,
+
+    /// Log records of the canister.
+    pub canister_log: CanisterLog,
+
+    /// The Wasm memory limit. This is a field in developer-visible canister
+    /// settings that allows the developer to limit the usage of the Wasm memory
+    /// by the canister to leave some room in 4GiB for upgrade calls.
+    /// See the interface specification for more information.
+    pub wasm_memory_limit: Option<NumBytes>,
+
+    /// Next local snapshot id.
+    pub next_snapshot_id: u64,
+
+    /// The set of snapshots ids of the canister.
+    pub snapshot_ids: BTreeSet<SnapshotId>,
 }
 
 /// A wrapper around the different canister statuses.
@@ -704,6 +721,10 @@ impl SystemState {
             canister_history: CanisterHistory::default(),
             wasm_chunk_store,
             log_visibility: LogVisibility::default(),
+            canister_log: Default::default(),
+            wasm_memory_limit: None,
+            next_snapshot_id: 0,
+            snapshot_ids: btreeset! {},
         }
     }
 
@@ -748,6 +769,10 @@ impl SystemState {
         wasm_chunk_store_data: PageMap,
         wasm_chunk_store_metadata: WasmChunkStoreMetadata,
         log_visibility: LogVisibility,
+        canister_log: CanisterLog,
+        wasm_memory_limit: Option<NumBytes>,
+        next_snapshot_id: u64,
+        snapshot_ids: BTreeSet<SnapshotId>,
     ) -> Self {
         Self {
             controllers,
@@ -771,6 +796,10 @@ impl SystemState {
                 wasm_chunk_store_metadata,
             ),
             log_visibility,
+            canister_log,
+            wasm_memory_limit,
+            next_snapshot_id,
+            snapshot_ids,
         }
     }
 
@@ -886,6 +915,13 @@ impl SystemState {
     /// Sets `reserved_balance_limit` to `None` for testing.
     pub fn clear_reserved_balance_limit_for_testing(&mut self) {
         self.reserved_balance_limit = None;
+    }
+
+    /// Get new local snapshot ID.
+    pub fn new_local_snapshot_id(&mut self) -> u64 {
+        let local_snapshot_id = self.next_snapshot_id;
+        self.next_snapshot_id += 1;
+        local_snapshot_id
     }
 
     /// Records the given amount as debit that will be charged from the balance

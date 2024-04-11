@@ -54,7 +54,10 @@ pub(crate) fn initiate_reshare_requests(
 
 pub(super) fn make_reshare_dealings_response(
     ecdsa_dealings_contexts: &'_ BTreeMap<CallbackId, EcdsaDealingsContext>,
-) -> impl Fn(&ecdsa::EcdsaReshareRequest, &InitialIDkgDealings) -> Option<ic_types::messages::Response>
+) -> impl Fn(
+    &ecdsa::EcdsaReshareRequest,
+    &InitialIDkgDealings,
+) -> Option<ic_types::batch::ConsensusResponse>
        + '_ {
     Box::new(
         move |request: &ecdsa::EcdsaReshareRequest, initial_dealings: &InitialIDkgDealings| {
@@ -62,23 +65,21 @@ pub(super) fn make_reshare_dealings_response(
                 if request
                     == &(ecdsa::EcdsaReshareRequest {
                         key_id: context.key_id.clone(),
+                        master_key_id: None,
                         receiving_node_ids: context.nodes.iter().copied().collect(),
                         registry_version: context.registry_version,
                     })
                 {
-                    use ic_ic00_types::ComputeInitialEcdsaDealingsResponse;
-                    return Some(ic_types::messages::Response {
-                        originator: context.request.sender,
-                        respondent: ic_types::CanisterId::ic_00(),
-                        originator_reply_callback: *callback_id,
-                        refund: context.request.payment,
-                        response_payload: ic_types::messages::Payload::Data(
+                    use ic_management_canister_types::ComputeInitialEcdsaDealingsResponse;
+                    return Some(ic_types::batch::ConsensusResponse::new(
+                        *callback_id,
+                        ic_types::messages::Payload::Data(
                             ComputeInitialEcdsaDealingsResponse {
                                 initial_dkg_dealings: initial_dealings.into(),
                             }
                             .encode(),
                         ),
-                    });
+                    ));
                 }
             }
             None
@@ -96,7 +97,7 @@ pub(crate) fn update_completed_reshare_requests(
     make_reshare_dealings_response: &dyn Fn(
         &ecdsa::EcdsaReshareRequest,
         &InitialIDkgDealings,
-    ) -> Option<ic_types::messages::Response>,
+    ) -> Option<ic_types::batch::ConsensusResponse>,
     resolver: &dyn EcdsaBlockReader,
     transcript_builder: &dyn EcdsaTranscriptBuilder,
     log: &ReplicaLogger,
@@ -165,6 +166,7 @@ pub(super) fn get_reshare_requests(
         .values()
         .map(|context| ecdsa::EcdsaReshareRequest {
             key_id: context.key_id.clone(),
+            master_key_id: None,
             receiving_node_ids: context.nodes.iter().copied().collect(),
             registry_version: context.registry_version,
         })
@@ -173,8 +175,8 @@ pub(super) fn get_reshare_requests(
 
 #[cfg(test)]
 pub mod test_utils {
-    use ic_ic00_types::EcdsaKeyId;
-    use ic_test_utilities::types::ids::node_test_id;
+    use ic_management_canister_types::EcdsaKeyId;
+    use ic_test_utilities_types::ids::node_test_id;
     use ic_types::RegistryVersion;
 
     use super::*;
@@ -186,6 +188,7 @@ pub mod test_utils {
     ) -> ecdsa::EcdsaReshareRequest {
         ecdsa::EcdsaReshareRequest {
             key_id,
+            master_key_id: None,
             receiving_node_ids: (0..num_nodes).map(node_test_id).collect::<Vec<_>>(),
             registry_version: RegistryVersion::from(registry_version),
         }
@@ -200,23 +203,38 @@ mod tests {
     use super::*;
 
     use assert_matches::assert_matches;
-    use ic_crypto_test_utils_canister_threshold_sigs::dummy_values::dummy_dealings;
+    use ic_crypto_test_utils_canister_threshold_sigs::dummy_values::{
+        dummy_dealings, dummy_initial_idkg_dealing_for_tests,
+    };
     use ic_crypto_test_utils_reproducible_rng::reproducible_rng;
-    use ic_ic00_types::EcdsaKeyId;
     use ic_logger::replica_logger::no_op_logger;
-    use ic_test_utilities::types::ids::subnet_test_id;
-    use ic_types::consensus::ecdsa::EcdsaPayload;
-
-    use crate::ecdsa::test_utils::{
-        empty_response, set_up_ecdsa_payload, TestEcdsaBlockReader, TestEcdsaTranscriptBuilder,
+    use ic_management_canister_types::{ComputeInitialEcdsaDealingsResponse, EcdsaKeyId};
+    use ic_test_utilities_types::{
+        ids::{node_test_id, subnet_test_id},
+        messages::RequestBuilder,
+    };
+    use ic_types::{
+        consensus::ecdsa::{EcdsaPayload, EcdsaReshareRequest},
+        crypto::AlgorithmId,
+        time::UNIX_EPOCH,
+        RegistryVersion,
     };
 
-    fn set_up(should_create_key_transcript: bool) -> (EcdsaPayload, TestEcdsaBlockReader) {
+    use crate::ecdsa::test_utils::{
+        empty_response, fake_ecdsa_key_id, set_up_ecdsa_payload, TestEcdsaBlockReader,
+        TestEcdsaTranscriptBuilder,
+    };
+
+    fn set_up(
+        key_ids: Vec<EcdsaKeyId>,
+        should_create_key_transcript: bool,
+    ) -> (EcdsaPayload, TestEcdsaBlockReader) {
         let mut rng = reproducible_rng();
         let (ecdsa_payload, _env, block_reader) = set_up_ecdsa_payload(
             &mut rng,
             subnet_test_id(1),
             /*nodes_count=*/ 4,
+            key_ids,
             should_create_key_transcript,
         );
 
@@ -224,10 +242,63 @@ mod tests {
     }
 
     #[test]
+    fn test_make_reshare_dealings_response() {
+        let make_key_id =
+            |i: u64| EcdsaKeyId::from_str(&format!("Secp256k1:some_key_{i}")).unwrap();
+        let make_reshare_request = |i| EcdsaReshareRequest {
+            key_id: make_key_id(i),
+            master_key_id: None,
+            receiving_node_ids: vec![node_test_id(i)],
+            registry_version: RegistryVersion::from(i),
+        };
+
+        let max = 5;
+        let mut contexts = BTreeMap::new();
+        for i in 0..max {
+            let request = make_reshare_request(i);
+            let context = EcdsaDealingsContext {
+                request: RequestBuilder::new().build(),
+                key_id: request.key_id.clone(),
+                nodes: BTreeSet::from_iter(request.receiving_node_ids.into_iter()),
+                registry_version: request.registry_version,
+                time: UNIX_EPOCH,
+            };
+            contexts.insert(CallbackId::from(i), context);
+        }
+
+        let initial_dealings = dummy_initial_idkg_dealing_for_tests(
+            AlgorithmId::ThresholdEcdsaSecp256k1,
+            &mut reproducible_rng(),
+        );
+        let func = make_reshare_dealings_response(&contexts);
+
+        for i in 0..max {
+            let request = make_reshare_request(i);
+            let res = func(&request, &initial_dealings).expect("Should get a response");
+            assert_eq!(CallbackId::from(i), res.callback);
+
+            let ic_types::messages::Payload::Data(data) = res.payload else {
+                panic!("Request should have a data response");
+            };
+
+            let response = ComputeInitialEcdsaDealingsResponse::decode(&data)
+                .expect("Failed to decode response");
+            let dealings = InitialIDkgDealings::try_from(&response.initial_dkg_dealings)
+                .expect("Failed to convert dealings");
+            assert_eq!(initial_dealings, dealings);
+        }
+
+        assert_eq!(func(&make_reshare_request(max), &initial_dealings), None);
+    }
+
+    #[test]
     fn test_ecdsa_initiate_reshare_requests_should_not_accept_when_key_transcript_not_created() {
-        let (mut payload, _block_reader) = set_up(/*should_create_key_transcript=*/ false);
-        let request =
-            create_reshare_request(EcdsaKeyId::from_str("Secp256k1:some_key").unwrap(), 1, 1);
+        let key_id = fake_ecdsa_key_id();
+        let (mut payload, _block_reader) = set_up(
+            vec![key_id.clone()],
+            /*should_create_key_transcript=*/ false,
+        );
+        let request = create_reshare_request(key_id, 1, 1);
 
         initiate_reshare_requests(&mut payload, BTreeSet::from([request]));
 
@@ -237,9 +308,12 @@ mod tests {
 
     #[test]
     fn test_ecdsa_initiate_reshare_requests_good_path() {
-        let (mut payload, _block_reader) = set_up(/*should_create_key_transcript=*/ true);
-        let request =
-            create_reshare_request(EcdsaKeyId::from_str("Secp256k1:some_key").unwrap(), 1, 1);
+        let key_id = fake_ecdsa_key_id();
+        let (mut payload, _block_reader) = set_up(
+            vec![key_id.clone()],
+            /*should_create_key_transcript=*/ true,
+        );
+        let request = create_reshare_request(key_id, 1, 1);
 
         initiate_reshare_requests(&mut payload, BTreeSet::from([request.clone()]));
 
@@ -249,8 +323,11 @@ mod tests {
 
     #[test]
     fn test_ecdsa_initiate_reshare_requests_incremental() {
-        let (mut payload, _block_reader) = set_up(/*should_create_key_transcript=*/ true);
-        let key_id = EcdsaKeyId::from_str("Secp256k1:some_key").unwrap();
+        let key_id = fake_ecdsa_key_id();
+        let (mut payload, _block_reader) = set_up(
+            vec![key_id.clone()],
+            /*should_create_key_transcript=*/ true,
+        );
         let request = create_reshare_request(key_id.clone(), 1, 1);
         let request_2 = create_reshare_request(key_id.clone(), 2, 2);
 
@@ -264,9 +341,12 @@ mod tests {
 
     #[test]
     fn test_ecdsa_initiate_reshare_requests_should_not_accept_already_completed() {
-        let (mut payload, _block_reader) = set_up(/*should_create_key_transcript=*/ true);
-        let request =
-            create_reshare_request(EcdsaKeyId::from_str("Secp256k1:some_key").unwrap(), 1, 1);
+        let key_id = fake_ecdsa_key_id();
+        let (mut payload, _block_reader) = set_up(
+            vec![key_id.clone()],
+            /*should_create_key_transcript=*/ true,
+        );
+        let request = create_reshare_request(key_id, 1, 1);
         payload.xnet_reshare_agreements.insert(
             request.clone(),
             ecdsa::CompletedReshareRequest::ReportedToExecution,
@@ -280,10 +360,13 @@ mod tests {
 
     #[test]
     fn test_ecdsa_update_completed_reshare_requests() {
-        let (mut payload, block_reader) = set_up(/*should_create_key_transcript=*/ true);
+        let key_id = fake_ecdsa_key_id();
+        let (mut payload, block_reader) = set_up(
+            vec![key_id.clone()],
+            /*should_create_key_transcript=*/ true,
+        );
         let transcript_builder = TestEcdsaTranscriptBuilder::new();
 
-        let key_id = EcdsaKeyId::from_str("Secp256k1:some_key").unwrap();
         let request_1 = create_reshare_request(key_id.clone(), 1, 1);
         let request_2 = create_reshare_request(key_id.clone(), 2, 2);
         initiate_reshare_requests(

@@ -278,11 +278,9 @@ mod tests {
         Dependencies,
     };
     use ic_logger::replica_logger::no_op_logger;
-    use ic_test_utilities::{
-        message_routing::FakeMessageRouting,
-        types::ids::{node_test_id, subnet_test_id},
-    };
+    use ic_test_utilities::message_routing::FakeMessageRouting;
     use ic_test_utilities_registry::SubnetRecordBuilder;
+    use ic_test_utilities_types::ids::{node_test_id, subnet_test_id};
     use ic_types::{
         consensus::{ecdsa::QuadrupleId, BlockPayload, Payload, SummaryPayload},
         crypto::CryptoHash,
@@ -399,9 +397,9 @@ mod tests {
             let key_id = fake_ecdsa_key_id();
 
             // Create three quadruple Ids and contexts, quadruple "2" will remain unmatched.
-            let quadruple_id1 = QuadrupleId(1, Some(key_id.clone()));
-            let quadruple_id2 = QuadrupleId(2, Some(key_id.clone()));
-            let quadruple_id3 = QuadrupleId(3, Some(key_id.clone()));
+            let quadruple_id1 = QuadrupleId::new(1);
+            let quadruple_id2 = QuadrupleId::new(2);
+            let quadruple_id3 = QuadrupleId::new(3);
 
             let contexts = vec![
                 fake_sign_with_ecdsa_context_with_quadruple(
@@ -423,7 +421,8 @@ mod tests {
                 .return_const(Ok(fake_state_with_ecdsa_contexts(
                     Height::from(0),
                     contexts.clone(),
-                )));
+                )
+                .get_labeled_state()));
 
             let message_routing = FakeMessageRouting::new();
             *message_routing.next_batch_height.write().unwrap() = Height::from(2);
