@@ -27,43 +27,43 @@ reinstall_ledgers:
 .PHONY: deploy
 .SILENT: deploy
 deploy:
-	dfx deploy --ic ic_ckbtc_minter_syron --argument '(variant { Init = record { mode = variant { GeneralAvailability }; btc_network = variant { Testnet }; ledger_id = principal "$(BTC_LEDGER)"; susd_id = principal "$(SUSD_LEDGER)"; xrc_id = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai"; ecdsa_key_name = "test_key_1"; min_confirmations = opt 1; retrieve_btc_min_amount = 600; max_time_in_queue_nanos = 600_000_000_000 } })'
+	dfx deploy --ic ic_ckbtc_minter_tyron --argument '(variant { Init = record { mode = variant { GeneralAvailability }; btc_network = variant { Testnet }; ledger_id = principal "$(BTC_LEDGER)"; susd_id = principal "$(SUSD_LEDGER)"; xrc_id = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai"; ecdsa_key_name = "test_key_1"; min_confirmations = opt 1; retrieve_btc_min_amount = 600; max_time_in_queue_nanos = 600_000_000_000 } })'
 
 .PHONY: vault
 .SILENT: vault
 vault:
-	dfx canister --ic call ic_ckbtc_minter_syron get_btc_address "(record { ssi=\"$(SSI)\";})"
+	dfx canister --ic call ic_ckbtc_minter_tyron get_btc_address "(record { ssi=\"$(SSI)\";})"
 	
 .PHONY: susd
 .SILENT: susd
 susd:
-	dfx canister --ic call ic_ckbtc_minter_syron update_balance "(record { ssi=\"$(SSI)\";})"
+	dfx canister --ic call ic_ckbtc_minter_tyron update_balance "(record { ssi=\"$(SSI)\";})"
 
 .PHONY: withdrawal_account
 .SILENT: withdrawal_account
 withdrawal_account:
-	dfx canister --ic call ic_ckbtc_minter_syron get_withdrawal_account
+	dfx canister --ic call ic_ckbtc_minter_tyron get_withdrawal_account
 # "(record { ssi=\"$(SSI)\";})"
 
 .PHONY: fees
 .SILENT: fees
 fees : # estimate_withdrawal_fee : (record { amount : opt nat64 }) -> (record { bitcoin_fee : nat64; minter_fee : nat64 }) query;
-	dfx canister --ic call ic_ckbtc_minter_syron estimate_withdrawal_fee "(record { amount=null;})"
+	dfx canister --ic call ic_ckbtc_minter_tyron estimate_withdrawal_fee "(record { amount=null;})"
 
 .PHONY: info
 .SILENT: info
 info:
-	dfx canister --ic call ic_ckbtc_minter_syron get_minter_info
+	dfx canister --ic call ic_ckbtc_minter_tyron get_minter_info
 
 .PHONY: status
 .SILENT: status
 status:
-	dfx canister --ic call ic_ckbtc_minter_syron get_canister_status
+	dfx canister --ic call ic_ckbtc_minter_tyron get_canister_status
 
 .PHONY: reinstall
 .SILENT: reinstall
 reinstall:
-	dfx canister --ic install --mode=reinstall ic_ckbtc_minter_syron --argument '(variant { Init = record { mode = variant { GeneralAvailability }; btc_network = variant { Testnet }; ledger_id = principal "$(BTC_LEDGER)"; susd_id = principal "$(SUSD_LEDGER)"; xrc_id = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai"; ecdsa_key_name = "test_key_1"; min_confirmations = opt 1; retrieve_btc_min_amount = 1_000; max_time_in_queue_nanos = 600_000_000_000 } })'
+	dfx canister --ic install --mode=reinstall ic_ckbtc_minter_tyron --argument '(variant { Init = record { mode = variant { GeneralAvailability }; btc_network = variant { Testnet }; ledger_id = principal "$(BTC_LEDGER)"; susd_id = principal "$(SUSD_LEDGER)"; xrc_id = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai"; ecdsa_key_name = "test_key_1"; min_confirmations = opt 1; retrieve_btc_min_amount = 1_000; max_time_in_queue_nanos = 600_000_000_000 } })'
 # ;kyt_principal = opt principal "$(PRINCIPAL)"
 
 .PHONY: clean
@@ -106,7 +106,7 @@ cy:
 .PHONY: subaccount
 .SILENT: subaccount
 subaccount:
-	dfx canister --ic call ic_ckbtc_minter_syron get_subaccount "( \"$(SSI)\" )"
+	dfx canister --ic call ic_ckbtc_minter_tyron get_subaccount "( \"$(SSI)\" )"
 
 .PHONY: transfer_btc
 .SILENT: transfer_btc
@@ -120,4 +120,4 @@ transfer_btc:
 .PHONY: minter_info
 .SILENT: minter_info
 minter_info:
-	dfx canister --ic call ic_ckbtc_minter_syron get_minter_info
+	dfx canister --ic call ic_ckbtc_minter_tyron get_minter_info

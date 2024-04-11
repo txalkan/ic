@@ -1,13 +1,13 @@
 [package]
-name = "ic-ckbtc-minter-syron"
+name = "ic-ckbtc-minter-tyron"
 version = "0.1.0"
 edition.workspace = true
-authors = ["Xalkan Duarte <xalkan@pm.me>"]
-description = "Syron is a decentralized finance (DeFi) project centered on Bitcoin, focused on developing the Syron U$ Dollar (SU$D), an overcollateralized stablecoin pegged to the U.S. dollar. Powered by the Internet Computer, Syron aims to provide users with seamless access to USD liquidity while leveraging the security and decentralization of Bitcoin."
-documentation = "https://syron.ssiprotocol.com"
+authors = ["Xalkan Duarte <xalkan@tyron.io>"]
+description = "Tyron is a decentralized finance (DeFi) project focused on developing the Syron U$ Dollar (SU$D), an overcollateralized stablecoin pegged to the U.S. dollar and backed by BTC. Powered by the Internet Computer, Syron aims to provide users with seamless access to USD liquidity while leveraging the security and decentralization of Bitcoin."
+documentation = "https://docs.tyron.io"
 
 [[bin]]
-name = "ic-ckbtc-minter-syron"
+name = "ic-ckbtc-minter-tyron"
 path = "src/main.rs"
 
 [dependencies]

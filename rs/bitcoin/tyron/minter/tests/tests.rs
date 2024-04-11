@@ -7,23 +7,23 @@ use ic_bitcoin_canister_mock::{OutPoint, PushUtxoToAddress, Utxo};
 use ic_btc_interface::{Network, Txid};
 use ic_canisters_http_types::{HttpRequest, HttpResponse};
 use ic_syron_kyt::{InitArg as KytInitArg, KytMode, LifecycleArg, SetApiKeyArg};
-use ic_ckbtc_minter_syron::lifecycle::init::{InitArgs as MinterInitArgs, MinterArg};
-use ic_ckbtc_minter_syron::lifecycle::upgrade::UpgradeArgs;
-use ic_ckbtc_minter_syron::queries::{EstimateFeeArg, RetrieveBtcStatusRequest, WithdrawalFee};
-use ic_ckbtc_minter_syron::state::{
+use ic_ckbtc_minter_tyron::lifecycle::init::{InitArgs as MinterInitArgs, MinterArg};
+use ic_ckbtc_minter_tyron::lifecycle::upgrade::UpgradeArgs;
+use ic_ckbtc_minter_tyron::queries::{EstimateFeeArg, RetrieveBtcStatusRequest, WithdrawalFee};
+use ic_ckbtc_minter_tyron::state::{
     BtcRetrievalStatusV2, Mode, ReimburseDepositTask, ReimbursedDeposit,
     ReimbursementReason::{CallFailed, TaintedDestination},
     RetrieveBtcStatus, RetrieveBtcStatusV2,
 };
-use ic_ckbtc_minter_syron::updates::get_btc_address::GetBtcAddressArgs;
-use ic_ckbtc_minter_syron::updates::retrieve_btc::{
+use ic_ckbtc_minter_tyron::updates::get_btc_address::GetBtcAddressArgs;
+use ic_ckbtc_minter_tyron::updates::retrieve_btc::{
     RetrieveBtcArgs, RetrieveBtcError, RetrieveBtcOk, RetrieveBtcWithApprovalArgs,
     RetrieveBtcWithApprovalError,
 };
-use ic_ckbtc_minter_syron::updates::update_balance::{
+use ic_ckbtc_minter_tyron::updates::update_balance::{
     PendingUtxo, UpdateBalanceArgs, UpdateBalanceError, UtxoStatus,
 };
-use ic_ckbtc_minter_syron::{
+use ic_ckbtc_minter_tyron::{
     Log, MinterInfo, LEDGER_MEMO_SIZE, MIN_RELAY_FEE_PER_VBYTE, MIN_RESUBMISSION_DELAY,
 };
 use ic_icrc1_ledger::{InitArgsBuilder as LedgerInitArgsBuilder, LedgerArgument};
@@ -43,6 +43,7 @@ const TRANSFER_FEE: u64 = 10;
 const MIN_CONFIRMATIONS: u32 = 12;
 const MAX_TIME_IN_QUEUE: Duration = Duration::from_secs(10);
 const WITHDRAWAL_ADDRESS: &str = "bc1q34aq5drpuwy3wgl9lhup9892qp6svr8ldzyy7c";
+const SSI: &str = "bc1q34aq5drpuwy3wgl9lhup9892qp6svr8ldzyy7c";
 
 fn ledger_wasm() -> Vec<u8> {
     let path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
@@ -61,7 +62,7 @@ fn ledger_wasm() -> Vec<u8> {
 fn minter_wasm() -> Vec<u8> {
     load_wasm(
         std::env::var("CARGO_MANIFEST_DIR").unwrap(),
-        "ic-ckbtc-minter-syron",
+        "ic-ckbtc-minter-tyron",
         &[],
     )
 }
@@ -98,7 +99,7 @@ fn install_ledger(env: &StateMachine) -> CanisterId {
         .unwrap()
 }
 
-fn install_minter(env: &StateMachine, ledger_id: CanisterId) -> CanisterId {
+fn install_minter(env: &StateMachine, ledger_id: CanisterId, susd_id: CanisterId, xrc_id: CanisterId) -> CanisterId {
     let args = MinterInitArgs {
         btc_network: Network::Regtest.into(),
         // The name of the [EcdsaKeyId]. Use "dfx_test_key" for local replica and "test_key_1" for
@@ -106,6 +107,8 @@ fn install_minter(env: &StateMachine, ledger_id: CanisterId) -> CanisterId {
         ecdsa_key_name: "dfx_test_key".parse().unwrap(),
         retrieve_btc_min_amount: 2000,
         ledger_id,
+        susd_id,
+        xrc_id,
         max_time_in_queue_nanos: 0,
         min_confirmations: Some(1),
         mode: Mode::GeneralAvailability,
@@ -154,7 +157,7 @@ fn range_to_txid(range: std::ops::RangeInclusive<u8>) -> Txid {
 }
 
 #[test]
-fn test_install_ckbtc_minter_syron_canister() {
+fn test_install_ckbtc_minter_tyron_canister() {
     let env = StateMachine::new();
     let ledger_id = install_ledger(&env);
     install_minter(&env, ledger_id);
@@ -171,6 +174,8 @@ fn test_wrong_upgrade_parameter() {
         ecdsa_key_name: "".into(),
         retrieve_btc_min_amount: 100_000,
         ledger_id: CanisterId::from_u64(0),
+        susd_id: CanisterId::from_u64(0),
+        xrc_id: CanisterId::from_u64(0),
         max_time_in_queue_nanos: MAX_TIME_IN_QUEUE.as_nanos() as u64,
         min_confirmations: Some(6_u32),
         mode: Mode::GeneralAvailability,
@@ -186,6 +191,8 @@ fn test_wrong_upgrade_parameter() {
         ecdsa_key_name: "some_key".into(),
         retrieve_btc_min_amount: 100_000,
         ledger_id: CanisterId::from_u64(0),
+        susd_id: CanisterId::from_u64(0),
+        xrc_id: CanisterId::from_u64(0),
         max_time_in_queue_nanos: MAX_TIME_IN_QUEUE.as_nanos() as u64,
         min_confirmations: Some(6_u32),
         mode: Mode::GeneralAvailability,
@@ -249,6 +256,7 @@ fn test_upgrade_read_only() {
     let update_balance_args = UpdateBalanceArgs {
         owner: None,
         subaccount: None,
+        ssi: SSI.to_string()
     };
     let res = env
         .execute_ingress_as(
@@ -269,6 +277,7 @@ fn test_upgrade_read_only() {
     let retrieve_btc_args = RetrieveBtcArgs {
         amount: 10,
         address: "".into(),
+        ssi: SSI.to_string()
     };
     let res = env
         .execute_ingress_as(
@@ -319,6 +328,7 @@ fn test_upgrade_restricted() {
     let update_balance_args = UpdateBalanceArgs {
         owner: None,
         subaccount: None,
+        ssi: SSI.to_string()
     };
     let res = env
         .execute_ingress_as(
@@ -339,6 +349,7 @@ fn test_upgrade_restricted() {
     let retrieve_btc_args = RetrieveBtcArgs {
         amount: 10,
         address: "".into(),
+        ssi: SSI.to_string()
     };
     let res = env
         .execute_ingress_as(
@@ -370,6 +381,7 @@ fn test_upgrade_restricted() {
     let update_balance_args = UpdateBalanceArgs {
         owner: None,
         subaccount: None,
+        ssi: SSI.to_string()
     };
 
     let res = env
@@ -413,6 +425,7 @@ fn test_no_new_utxos() {
     let update_balance_args = UpdateBalanceArgs {
         owner: None,
         subaccount: None,
+        ssi: SSI.to_string()
     };
     let res = syron
         .env
@@ -478,6 +491,7 @@ fn update_balance_should_return_correct_confirmations() {
     let update_balance_args = UpdateBalanceArgs {
         owner: None,
         subaccount: None,
+        ssi: SSI.to_string()
     };
 
     let res = syron
@@ -514,6 +528,7 @@ fn test_illegal_caller() {
     let update_balance_args = UpdateBalanceArgs {
         owner: Some(Principal::from_str(&minter_id.get().to_string()).unwrap()),
         subaccount: None,
+        ssi: SSI.to_string()
     };
     // This call should panick
     let res = env.execute_ingress_as(
@@ -576,6 +591,7 @@ fn test_minter() {
         &GetBtcAddressArgs {
             owner: None,
             subaccount: None,
+            ssi: SSI.to_string(),
         },
     );
     let address_1 = Address::from_str(&btc_address_1).expect("invalid bitcoin address");
@@ -585,6 +601,7 @@ fn test_minter() {
         &GetBtcAddressArgs {
             owner: None,
             subaccount: Some([1; 32]),
+            ssi: SSI.to_string(),
         },
     );
     let address_2 = Address::from_str(&btc_address_2).expect("invalid bitcoin address");
@@ -844,6 +861,7 @@ impl Setup {
                         Encode!(&UpdateBalanceArgs {
                             owner: Some(account.owner),
                             subaccount: account.subaccount,
+                            ssi: SSI.to_string()
                         })
                         .unwrap()
                     )
@@ -964,12 +982,14 @@ impl Setup {
         &self,
         address: String,
         amount: u64,
+        SSI: &str
     ) -> Result<RetrieveBtcOk, RetrieveBtcError> {
         Decode!(
             &assert_reply(
                 self.env.execute_ingress_as(self.caller, self.minter_id, "retrieve_btc", Encode!(&RetrieveBtcArgs {
                     address,
                     amount,
+                    ssi: SSI.to_string()
                 }).unwrap())
                 .expect("failed to execute retrieve_btc request")
             ),
@@ -1112,7 +1132,7 @@ impl Setup {
     }
 
     pub fn print_minter_events(&self) {
-        use ic_ckbtc_minter_syron::state::eventlog::{Event, GetEventsArg};
+        use ic_ckbtc_minter_tyron::state::eventlog::{Event, GetEventsArg};
         let events = Decode!(
             &assert_reply(
                 self.env
@@ -1256,7 +1276,7 @@ fn test_transaction_finalization() {
     syron.transfer(user, withdrawal_account, withdrawal_amount);
 
     let RetrieveBtcOk { block_index } = syron
-        .retrieve_btc(WITHDRAWAL_ADDRESS.to_string(), withdrawal_amount)
+        .retrieve_btc(WITHDRAWAL_ADDRESS.to_string(), withdrawal_amount, SSI)
         .expect("retrieve_btc failed");
 
     syron.env.advance_time(MAX_TIME_IN_QUEUE);
@@ -1345,7 +1365,7 @@ fn test_transaction_resubmission_finalize_new() {
     syron.transfer(user, withdrawal_account, withdrawal_amount);
 
     let RetrieveBtcOk { block_index } = syron
-        .retrieve_btc(WITHDRAWAL_ADDRESS.to_string(), withdrawal_amount)
+        .retrieve_btc(WITHDRAWAL_ADDRESS.to_string(), withdrawal_amount, SSI)
         .expect("retrieve_btc failed");
 
     syron.env.advance_time(MAX_TIME_IN_QUEUE);
@@ -1420,7 +1440,7 @@ fn test_transaction_resubmission_finalize_old() {
     syron.transfer(user, withdrawal_account, withdrawal_amount);
 
     let RetrieveBtcOk { block_index } = syron
-        .retrieve_btc(WITHDRAWAL_ADDRESS.to_string(), withdrawal_amount)
+        .retrieve_btc(WITHDRAWAL_ADDRESS.to_string(), withdrawal_amount, SSI)
         .expect("retrieve_btc failed");
 
     syron.env.advance_time(MAX_TIME_IN_QUEUE);
@@ -1587,6 +1607,7 @@ fn test_taproot_transaction_finalization() {
         .retrieve_btc(
             "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0".to_string(),
             withdrawal_amount,
+            SSI
         )
         .expect("retrieve_btc failed");
 
@@ -1641,7 +1662,7 @@ fn test_ledger_memo() {
     let res = syron.get_transactions(get_transaction_request);
     let memo = res.transactions[0].mint.clone().unwrap().memo.unwrap();
 
-    use ic_ckbtc_minter_syron::memo::MintMemo;
+    use ic_ckbtc_minter_tyron::memo::MintMemo;
     let decoded_data = minicbor::decode::<MintMemo>(&memo.0).expect("failed to decode memo");
     assert_eq!(
         decoded_data,
@@ -1660,7 +1681,7 @@ fn test_ledger_memo() {
     let btc_address = "bc1q34aq5drpuwy3wgl9lhup9892qp6svr8ldzyy7c".to_string();
 
     let RetrieveBtcOk { block_index } = syron
-        .retrieve_btc(btc_address.clone(), withdrawal_amount)
+        .retrieve_btc(btc_address.clone(), withdrawal_amount, SSI)
         .expect("retrieve_btc failed");
 
     let get_transaction_request = GetTransactionsRequest {
@@ -1669,7 +1690,7 @@ fn test_ledger_memo() {
     };
     let res = syron.get_transactions(get_transaction_request);
     let memo = res.transactions[0].burn.clone().unwrap().memo.unwrap();
-    use ic_ckbtc_minter_syron::memo::{BurnMemo, Status};
+    use ic_ckbtc_minter_tyron::memo::{BurnMemo, Status};
 
     let decoded_data = minicbor::decode::<BurnMemo>(&memo.0).expect("failed to decode memo");
     assert_eq!(
@@ -1808,7 +1829,7 @@ fn test_retrieve_btc_with_approval() {
     };
     let res = syron.get_transactions(get_transaction_request);
     let memo = res.transactions[0].burn.clone().unwrap().memo.unwrap();
-    use ic_ckbtc_minter_syron::memo::BurnMemo;
+    use ic_ckbtc_minter_tyron::memo::BurnMemo;
 
     let decoded_data = minicbor::decode::<BurnMemo>(&memo.0).expect("failed to decode memo");
     assert_eq!(
@@ -1897,7 +1918,7 @@ fn test_retrieve_btc_with_approval_from_subaccount() {
     };
     let res = syron.get_transactions(get_transaction_request);
     let memo = res.transactions[0].burn.clone().unwrap().memo.unwrap();
-    use ic_ckbtc_minter_syron::memo::BurnMemo;
+    use ic_ckbtc_minter_tyron::memo::BurnMemo;
 
     let decoded_data = minicbor::decode::<BurnMemo>(&memo.0).expect("failed to decode memo");
     assert_eq!(

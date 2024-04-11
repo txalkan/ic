@@ -7,10 +7,7 @@ The Syron U$ Dollar (SU$D) is an overcollateralized stablecoin pegged to the U.S
 
 This ICP implementation of Syron works with the link:../../../rosetta-api/icrc1/README.md[Syron Ledger Canister], managing SU$D token transfers, and the link:../../canister/README.adoc[Bitcoin Canister], interfacing with the Bitcoin network. The Syron Minter canister serves as a https://github.com/dfinity/ICRC-1/blob/8c526e1dae38622eb0940643996e8187d2063513/standards/ICRC-1/README.md#minting-account-[minter] for the Syron Ledger canister: it can mint and burn SU$D dollars.
 
-== Interact with the Syron Minter
-To interact with the testnet minter please move to rs/bitcoin/syron/testnet.
-
-
+== Interact with the Syron Canister
 === Bitcoin (BTC) to Syron (SU$D)
 
 image::public/images/syron_get_susd.png[]

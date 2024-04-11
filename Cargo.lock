@@ -5888,7 +5888,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ic-ckbtc-minter-syron"
+name = "ic-ckbtc-minter-tyron"
 version = "0.1.0"
 dependencies = [
  "assert_matches",

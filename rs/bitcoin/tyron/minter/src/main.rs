@@ -2,26 +2,26 @@ use candid::Principal;
 use ic_canister_log::export as export_logs;
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 use ic_cdk_macros::{init, post_upgrade, query, update};
-use ic_ckbtc_minter_syron::dashboard::build_dashboard;
-use ic_ckbtc_minter_syron::lifecycle::upgrade::UpgradeArgs;
-use ic_ckbtc_minter_syron::lifecycle::{self, init::MinterArg};
-use ic_ckbtc_minter_syron::metrics::encode_metrics;
-use ic_ckbtc_minter_syron::queries::{EstimateFeeArg, RetrieveBtcStatusRequest, WithdrawalFee};
-use ic_ckbtc_minter_syron::state::{
+use ic_ckbtc_minter_tyron::dashboard::build_dashboard;
+use ic_ckbtc_minter_tyron::lifecycle::upgrade::UpgradeArgs;
+use ic_ckbtc_minter_tyron::lifecycle::{self, init::MinterArg};
+use ic_ckbtc_minter_tyron::metrics::encode_metrics;
+use ic_ckbtc_minter_tyron::queries::{EstimateFeeArg, RetrieveBtcStatusRequest, WithdrawalFee};
+use ic_ckbtc_minter_tyron::state::{
     read_state, BtcRetrievalStatusV2, RetrieveBtcStatus, RetrieveBtcStatusV2,
 };
-use ic_ckbtc_minter_syron::tasks::{schedule_now, TaskType};
-use ic_ckbtc_minter_syron::updates::get_withdrawal_account::compute_subaccount;
-use ic_ckbtc_minter_syron::updates::retrieve_btc::{
+use ic_ckbtc_minter_tyron::tasks::{schedule_now, TaskType};
+use ic_ckbtc_minter_tyron::updates::get_withdrawal_account::compute_subaccount;
+use ic_ckbtc_minter_tyron::updates::retrieve_btc::{
     RetrieveBtcArgs, RetrieveBtcError, RetrieveBtcOk, RetrieveBtcWithApprovalArgs, RetrieveBtcWithApprovalError
 };
-use ic_ckbtc_minter_syron::updates::{
+use ic_ckbtc_minter_tyron::updates::{
     self,
     get_btc_address::GetBtcAddressArgs,
     update_balance::{UpdateBalanceArgs, UpdateBalanceError, UtxoStatus},
 };
-use ic_ckbtc_minter_syron::MinterInfo;
-use ic_ckbtc_minter_syron::{
+use ic_ckbtc_minter_tyron::MinterInfo;
+use ic_ckbtc_minter_tyron::{
     state::eventlog::{Event, GetEventsArg},
     storage, {Log, LogEntry, Priority},
 };
@@ -57,7 +57,7 @@ fn ok_or_die(result: Result<(), String>) {
 /// Checks that ckBTC minter state internally consistent.
 #[cfg(feature = "self_check")]
 fn check_invariants() -> Result<(), String> {
-    use ic_ckbtc_minter_syron::state::eventlog::replay;
+    use ic_ckbtc_minter_tyron::state::eventlog::replay;
 
     read_state(|s| {
         s.check_invariants()?;
@@ -80,17 +80,17 @@ fn check_invariants() -> Result<(), String> {
 #[cfg(feature = "self_check")]
 #[update]
 async fn distribute_kyt_fee() {
-    let _guard = match ic_ckbtc_minter_syron::guard::DistributeKytFeeGuard::new() {
+    let _guard = match ic_ckbtc_minter_tyron::guard::DistributeKytFeeGuard::new() {
         Some(guard) => guard,
         None => return,
     };
-    ic_ckbtc_minter_syron::distribute_kyt_fees().await;
+    ic_ckbtc_minter_tyron::distribute_kyt_fees().await;
 }
 
 #[cfg(feature = "self_check")]
 #[update]
 async fn refresh_fee_percentiles() {
-    let _ = ic_ckbtc_minter_syron::estimate_fee_per_vbyte().await;
+    let _ = ic_ckbtc_minter_tyron::estimate_fee_per_vbyte().await;
 }
 
 fn check_postcondition<T>(t: T) -> T {
@@ -110,7 +110,7 @@ fn timer() {
     #[cfg(feature = "self_check")]
     ok_or_die(check_invariants());
 
-    ic_ckbtc_minter_syron::timer();
+    ic_ckbtc_minter_tyron::timer();
 }
 
 #[post_upgrade]
@@ -190,7 +190,7 @@ async fn get_canister_status() -> ic_cdk::api::management_canister::main::Canist
 #[query]
 fn estimate_withdrawal_fee(arg: EstimateFeeArg) -> WithdrawalFee {
     read_state(|s| {
-        ic_ckbtc_minter_syron::estimate_fee(
+        ic_ckbtc_minter_tyron::estimate_fee(
             &s.available_utxos,
             arg.amount,
             s.last_fee_per_vbyte[50],
@@ -256,7 +256,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         };
 
         let mut entries: Log = Default::default();
-        for entry in export_logs(&ic_ckbtc_minter_syron::logs::P0) {
+        for entry in export_logs(&ic_ckbtc_minter_tyron::logs::P0) {
             entries.entries.push(LogEntry {
                 timestamp: entry.timestamp,
                 counter: entry.counter,
@@ -266,7 +266,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                 message: entry.message,
             });
         }
-        for entry in export_logs(&ic_ckbtc_minter_syron::logs::P1) {
+        for entry in export_logs(&ic_ckbtc_minter_tyron::logs::P1) {
             entries.entries.push(LogEntry {
                 timestamp: entry.timestamp,
                 counter: entry.counter,
