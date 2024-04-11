@@ -335,7 +335,7 @@ pub async fn update_balance(
     };
 
     let address = state::read_state(|s| {
-        get_btc_address::account_to_p2wpkh_address_from_state(s, &caller_account, &args.ssi)
+        get_btc_address::ssi_account_to_p2wpkh_address_from_state(s, &caller_account, &args.ssi)
     });
 
     let (btc_network, min_confirmations) =

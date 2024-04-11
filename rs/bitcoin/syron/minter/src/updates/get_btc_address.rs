@@ -14,15 +14,28 @@ use super::get_withdrawal_account::compute_subaccount;
 
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GetBtcAddressArgs {
-    //pub owner: Option<Principal>,
-    //pub subaccount: Option<Subaccount>,
-    
+    pub owner: Option<Principal>,
+    pub subaccount: Option<Subaccount>,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GetBoxAddressArgs {
     pub ssi: String
 }
 
 /// PRECONDITION: s.ecdsa_public_key.is_some()
-pub fn account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Account, ssi: &str) -> String {
+pub fn account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Account) -> String {
     crate::address::account_to_p2wpkh_address(
+        s.btc_network,
+        s.ecdsa_public_key
+            .as_ref()
+            .expect("bug: the ECDSA public key must be initialized"),
+        account,
+    )
+}
+
+pub fn ssi_account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Account, ssi: &str) -> String {
+    crate::address::ssi_account_to_p2wpkh_address(
         s.ecdsa_public_key
             .as_ref()
             .expect("bug: the ECDSA public key must be initialized"),
@@ -32,11 +45,24 @@ pub fn account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Acco
 }
 
 pub async fn get_btc_address(args: GetBtcAddressArgs) -> String {
-    //let owner = args.owner.unwrap_or_else(ic_cdk::caller);
+    let owner = args.owner.unwrap_or_else(ic_cdk::caller);
 
     init_ecdsa_public_key().await;
 
-    //@syron Deposit account = Withdrawal account
+    read_state(|s| {
+        account_to_p2wpkh_address_from_state(
+            s,
+            &Account {
+                owner,
+                subaccount: args.subaccount,
+            },
+        )
+    })
+}
+
+pub async fn get_box_address(args: GetBoxAddressArgs) -> String {
+    init_ecdsa_public_key().await;
+
     let minter = ic_cdk::id();
     let ssi_subaccount = compute_subaccount(1, &args.ssi);
 
@@ -48,7 +74,7 @@ pub async fn get_btc_address(args: GetBtcAddressArgs) -> String {
     ic_cdk::println!("Account: {}", caller_account);
 
     read_state(|s| {
-        account_to_p2wpkh_address_from_state(
+        ssi_account_to_p2wpkh_address_from_state(
             s,
             caller_account,
             &args.ssi

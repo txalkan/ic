@@ -160,9 +160,11 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
     let minter = ic_cdk::id();
     let ssi = &args.ssi;
 
+    // @dev Check if mode is available
     state::read_state(|s| s.mode.is_withdrawal_available_for(&minter))
         .map_err(RetrieveBtcError::TemporarilyUnavailable)?;
 
+    // @dev Check if SSI is in the blocklist
     if crate::blocklist::BTC_ADDRESS_BLOCKLIST
         .binary_search(&ssi.trim())
         .is_ok()
@@ -170,11 +172,12 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         ic_cdk::trap("attempted to retrieve BTC to a blocked address");
     }
 
+    // @dev Get Safe-Deposit Box address
     let ecdsa_public_key = init_ecdsa_public_key().await;
     
     let ssi_subaccount = compute_subaccount(1,ssi);
     
-    let vault_address = account_to_bitcoin_address(
+    let box_address = account_to_bitcoin_address(
         &ecdsa_public_key,
         &Account {
             owner: minter,
@@ -182,11 +185,15 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         },
         ssi
     );
-    if ssi.to_string() == vault_address.display(state::read_state(|s| s.btc_network)) {
+    // @dev Validate box against SSI
+    if ssi.to_string() == box_address.display(state::read_state(|s| s.btc_network)) {
         ic_cdk::trap("illegal retrieve_btc target");
     }
 
+    // @dev Get guard for the minter
     let _guard = retrieve_btc_guard(minter)?;
+    
+    // @dev Get state
     let (min_retrieve_amount, btc_network, kyt_fee) =
         read_state(|s| (s.retrieve_btc_min_amount, s.btc_network, s.kyt_fee));
 
@@ -196,6 +203,7 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
     }
 
     let parsed_address = BitcoinAddress::parse(ssi, btc_network)?;
+    
     if read_state(|s| s.count_incomplete_retrieve_btc_requests() >= MAX_CONCURRENT_PENDING_REQUESTS)
     {
         return Err(RetrieveBtcError::TemporarilyUnavailable(
@@ -268,7 +276,7 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         kyt_provider: None,//Some(kyt_provider),
         reimbursement_account: Some(Account {
             owner: minter,
-            subaccount: None, // @review (burn) compute subaccount
+            subaccount: Some(ssi_subaccount) // @review (mint) consider new ssi subaccount for syron allowance
         }),
     };
 

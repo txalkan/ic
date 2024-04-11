@@ -494,8 +494,8 @@ async fn finalize_requests() {
         subaccount: None,
     };
 
-    //@review
-    let main_address = address::account_to_bitcoin_address(&ecdsa_public_key, &main_account, "");//@review ""
+    //@review (mint) check use of main minter address vs basic bitcoin address
+    let main_address = address::account_to_bitcoin_address(&ecdsa_public_key, &main_account, "");
     let new_utxos = fetch_main_utxos(&main_account, &main_address).await;
 
     // Transactions whose change outpoint is present in the newly fetched UTXOs
@@ -833,7 +833,7 @@ pub async fn sign_transaction(
     output_account: &BTreeMap<tx::OutPoint, Account>,
     unsigned_tx: tx::UnsignedTransaction,
 ) -> Result<tx::SignedTransaction, management::CallError> {
-    use crate::address::{derivation_path, derive_public_key};
+    use crate::address::{ssi_derivation_path, derive_ssi_public_key};
 
     let mut signed_inputs = Vec::with_capacity(unsigned_tx.inputs.len());
     let sighasher = tx::TxSigHasher::new(&unsigned_tx);
@@ -850,8 +850,8 @@ pub async fn sign_transaction(
                     .get(outpoint)
                     .unwrap_or_else(|| panic!("bug: no account for outpoint {:?}", outpoint));
 
-                let path = derivation_path(account, ssi);
-                let pubkey = ByteBuf::from(derive_public_key(ecdsa_public_key, account, ssi).public_key);
+                let path = ssi_derivation_path(account, ssi);
+                let pubkey = ByteBuf::from(derive_ssi_public_key(ecdsa_public_key, account, ssi).public_key);
                 let pkhash = tx::hash160(&pubkey);
 
                 let sighash = sighasher.sighash(input, &pkhash);

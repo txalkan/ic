@@ -90,7 +90,16 @@ impl BitcoinAddress {
 
 /// Returns the derivation path that should be used to sign a message from a
 /// specified account.
-pub fn derivation_path(account: &Account, ssi: &str ) -> Vec<ByteBuf> {
+pub fn derivation_path(account: &Account) -> Vec<ByteBuf> {
+    const SCHEMA_V1: u8 = 1;
+    vec![
+        ByteBuf::from(vec![SCHEMA_V1]),
+        ByteBuf::from(account.owner.as_slice().to_vec()),
+        ByteBuf::from(account.effective_subaccount().to_vec()),
+    ]
+}
+
+pub fn ssi_derivation_path(account: &Account, ssi: &str ) -> Vec<ByteBuf> {
     const SCHEMA_V1: u8 = 1;
     vec![
         ByteBuf::from(vec![SCHEMA_V1]),
@@ -101,12 +110,30 @@ pub fn derivation_path(account: &Account, ssi: &str ) -> Vec<ByteBuf> {
 }
 
 /// Returns a valid extended BIP-32 derivation path from an Account (Principal + subaccount)
-pub fn derive_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Account, ssi: &str) -> ECDSAPublicKey {
+pub fn derive_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Account) -> ECDSAPublicKey {
     let ExtendedBip32DerivationOutput {
         derived_public_key,
         derived_chain_code,
     } = DerivationPath::new(
-        derivation_path(account, ssi)
+        derivation_path(account)
+            .into_iter()
+            .map(|x| DerivationIndex(x.into_vec()))
+            .collect(),
+    )
+    .public_key_derivation(&ecdsa_public_key.public_key, &ecdsa_public_key.chain_code)
+    .expect("bug: failed to derive an ECDSA public key from valid inputs");
+    ECDSAPublicKey {
+        public_key: derived_public_key,
+        chain_code: derived_chain_code,
+    }
+}
+
+pub fn derive_ssi_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Account, ssi: &str) -> ECDSAPublicKey {
+    let ExtendedBip32DerivationOutput {
+        derived_public_key,
+        derived_chain_code,
+    } = DerivationPath::new(
+        ssi_derivation_path(account, ssi)
             .into_iter()
             .map(|x| DerivationIndex(x.into_vec()))
             .collect(),
@@ -122,12 +149,23 @@ pub fn derive_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Account, s
 /// Derives a Bitcoin address for the specified account and converts it into
 /// bech32 textual representation.
 pub fn account_to_p2wpkh_address(
+    network: Network,
+    ecdsa_public_key: &ECDSAPublicKey,
+    account: &Account,
+) -> String {
+    network_and_public_key_to_p2wpkh(
+        network,
+        &derive_public_key(ecdsa_public_key, account).public_key,
+    )
+}
+
+pub fn ssi_account_to_p2wpkh_address(
     ecdsa_public_key: &ECDSAPublicKey,
     account: &Account,
     ssi: &str
 ) -> String {
-    network_and_public_key_to_p2wpkh(
-        &derive_public_key(ecdsa_public_key, account, ssi).public_key,
+    public_key_to_p2wpkh(
+        &derive_ssi_public_key(ecdsa_public_key, account, ssi).public_key,
     )
 }
 
@@ -137,7 +175,7 @@ pub fn account_to_bitcoin_address(
     account: &Account,
     ssi: &str
 ) -> BitcoinAddress {
-    let pk = derive_public_key(ecdsa_public_key, account, ssi).public_key;
+    let pk = derive_ssi_public_key(ecdsa_public_key, account, ssi).public_key;
     BitcoinAddress::P2wpkhV0(crate::tx::hash160(&pk))
 }
 
@@ -179,7 +217,13 @@ pub fn version_and_hash_to_address(version: u8, hash: &[u8; 20]) -> String {
 /// # Panics
 ///
 /// This function panics if the public key in not compressed.
-pub fn network_and_public_key_to_p2wpkh(public_key: &[u8]) -> String {
+pub fn network_and_public_key_to_p2wpkh(network: Network, public_key: &[u8]) -> String {
+    assert_eq!(public_key.len(), 33);
+    assert!(public_key[0] == 0x02 || public_key[0] == 0x03);
+    encode_bech32(network, &crate::tx::hash160(public_key), WitnessVersion::V0)
+}
+
+pub fn public_key_to_p2wpkh(public_key: &[u8]) -> String {
     let network =
         state::read_state(|s| (s.btc_network));
 
