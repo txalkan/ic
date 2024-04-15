@@ -17,8 +17,8 @@ use ic_ckbtc_minter_tyron::updates::retrieve_btc::{
 };
 use ic_ckbtc_minter_tyron::updates::{
     self,
-    get_btc_address::GetBtcAddressArgs,
-    update_balance::{UpdateBalanceArgs, UpdateBalanceError, UtxoStatus},
+    get_btc_address::GetBoxAddressArgs,
+    update_balance::{UpdateBalanceError, UtxoStatus},
 };
 use ic_ckbtc_minter_tyron::MinterInfo;
 use ic_ckbtc_minter_tyron::{
@@ -129,9 +129,9 @@ fn post_upgrade(minter_arg: Option<MinterArg>) {
 }
 
 #[update]
-async fn get_btc_address(args: GetBtcAddressArgs) -> String {
+async fn get_box_address(args: GetBoxAddressArgs) -> String {
     // check_anonymous_caller();
-    updates::get_btc_address::get_btc_address(args).await
+    updates::get_btc_address::get_box_address(args).await
 }
 
 #[update]
@@ -170,9 +170,9 @@ fn retrieve_btc_status_v2_by_account(target: Option<Account>) -> Vec<BtcRetrieva
 }
 
 #[update]
-async fn update_balance(args: UpdateBalanceArgs) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
+async fn update_ssi_balance(args: GetBoxAddressArgs) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
     // check_anonymous_caller();
-    check_postcondition(updates::update_balance::update_balance(args).await)
+    check_postcondition(updates::update_balance::update_ssi_balance(args).await)
 }
 
 #[update]

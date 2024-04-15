@@ -390,9 +390,7 @@ service : (minter_arg : MinterArg) -> {
 
     // Returns the bitcoin address to which the user should send BTC
     // to get SU$D using the [update_balance] endpoint.
-    //
-    // If the owner is not set, it defaults to the caller's principal.
-    get_btc_address : (record { /*owner: opt principal; subaccount: opt blob;*/ ssi: text }) -> (text);
+    get_box_address : (record { ssi: text }) -> (text);
 
     // Mints SU$D for newly deposited UTXOs.
     //
@@ -401,8 +399,8 @@ service : (minter_arg : MinterArg) -> {
     // # Preconditions
     //
     // * The owner deposited some BTC to the address that the
-    //   [get_btc_address] endpoint returns.
-    update_balance : (record { /*owner: opt principal; subaccount : opt blob;*/ ssi: text }) -> (variant { Ok : vec UtxoStatus; Err : UpdateBalanceError });
+    //   [get_box_address] endpoint returns.
+    update_ssi_balance : (record { ssi: text }) -> (variant { Ok : vec UtxoStatus; Err : UpdateBalanceError });
 
     // }}} Section "Deposit BTC to get SU$D"
 

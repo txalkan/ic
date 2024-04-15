@@ -14,7 +14,7 @@ use icrc_ledger_types::icrc1::account::{Account, Subaccount};
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use num_traits::ToPrimitive;
 use serde::Serialize;
-use super::get_btc_address::init_ecdsa_public_key;
+use super::get_btc_address::{init_ecdsa_public_key, GetBoxAddressArgs};
 use super::get_withdrawal_account::compute_subaccount;
 use crate::{
     guard::{balance_update_guard, GuardError},
@@ -29,11 +29,9 @@ use crate::{
 pub struct UpdateBalanceArgs {
     /// The owner of the account on the ledger.
     /// The minter uses the caller principal if the owner is None.
-    //pub owner: Option<Principal>,
+    pub owner: Option<Principal>,
     /// The desired subaccount on the ledger, if any.
-    //pub subaccount: Option<Subaccount>,
-
-    pub ssi: String
+    pub subaccount: Option<Subaccount>,
 }
 
 /// The outcome of UTXO processing.
@@ -311,48 +309,49 @@ impl From<CallError> for UpdateBalanceError {
 // }
 
 /// Notifies the minter to update the balance of the user subaccount.
-pub async fn update_balance(
-    args: UpdateBalanceArgs,
+pub async fn update_ssi_balance(
+    args: GetBoxAddressArgs,
 ) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
     let minter = ic_cdk::id();
-    // let caller = ic_cdk::caller();
-    // if args.owner.unwrap_or(caller) == ic_cdk::id() {
-    //     ic_cdk::trap("cannot update minter's balance");
-    // }
 
-    
     state::read_state(|s| s.mode.is_deposit_available_for(&minter))
         .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
 
     init_ecdsa_public_key().await;
     let _guard = balance_update_guard(minter/*args.owner.unwrap_or(caller)*/)?;
 
-    let ssi_subaccount = compute_subaccount(1, &args.ssi);
+    let ssi_box_subaccount = compute_subaccount(1, &args.ssi);
+    let ssi_balance_subaccount = compute_subaccount(2, &args.ssi);
     
-    let caller_account = Account {
-        owner: minter,//args.owner.unwrap_or(caller),
-        subaccount: Some(ssi_subaccount)//args.subaccount,
+    let ssi_box_account = Account {
+        owner: minter,
+        subaccount: Some(ssi_box_subaccount)
     };
 
-    let address = state::read_state(|s| {
-        get_btc_address::ssi_account_to_p2wpkh_address_from_state(s, &caller_account, &args.ssi)
+    let ssi_balance_account = Account {
+        owner: minter,
+        subaccount: Some(ssi_balance_subaccount)
+    };
+
+    let box_address = state::read_state(|s| {
+        get_btc_address::ssi_account_to_p2wpkh_address_from_state(s, &ssi_box_account, &args.ssi)
     });
 
     let (btc_network, min_confirmations) =
         state::read_state(|s| (s.btc_network, s.min_confirmations));
 
-    let utxos = get_utxos(btc_network, &address, min_confirmations, CallSource::Client)
+    let utxos = get_utxos(btc_network, &box_address, min_confirmations, CallSource::Client)
         .await?
         .utxos;
 
-    let new_utxos = state::read_state(|s| s.new_utxos_for_account(utxos, &caller_account));
+    let new_utxos = state::read_state(|s| s.new_utxos_for_account(utxos, &ssi_box_account));
 
     // Remove pending finalized transactions for the affected principal.
-    state::mutate_state(|s| s.finalized_utxos.remove(&caller_account.owner));
+    state::mutate_state(|s| s.finalized_utxos.remove(&ssi_box_account.owner));
 
-    let satoshis_to_mint = new_utxos.iter().map(|u| u.value).sum::<u64>();
+    let new_satoshis = new_utxos.iter().map(|u| u.value).sum::<u64>();
 
-    if satoshis_to_mint == 0 {
+    if new_satoshis == 0 {
         // We bail out early if there are no UTXOs to avoid creating a new entry
         // in the UTXOs map. If we allowed empty entries, malicious callers
         // could exhaust the canister memory.
@@ -366,7 +365,7 @@ pub async fn update_balance(
             ..
         } = get_utxos(
             btc_network,
-            &address,
+            &box_address,
             /*min_confirmations=*/ 0,
             CallSource::Client,
         )
@@ -410,7 +409,7 @@ pub async fn update_balance(
             mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
             log!(
                 P1,
-                "Ignored UTXO {} for account {caller_account} because UTXO value {} is lower than the KYT fee {}",
+                "Ignored UTXO {} for account {ssi_box_account} because UTXO value {} is lower than the KYT fee {}",
                 DisplayOutpoint(&utxo.outpoint),
                 DisplayAmount(utxo.value),
                 DisplayAmount(kyt_fee),
@@ -419,6 +418,7 @@ pub async fn update_balance(
             continue;
         }
 
+        // @review (inscription)
         if utxo.value == 546 {
             mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
             utxo_statuses.push(UtxoStatus::TransferInscription(utxo));
@@ -441,12 +441,11 @@ pub async fn update_balance(
             kyt_fee: Some(kyt_fee),
         };
 
-        // @review (mint) consider using satoshis_to_mint
-        match mint(amount, caller_account, /*crate::memo::encode(&memo).into()*/).await {
+        match mint(amount, ssi_box_account, /*crate::memo::encode(&memo).into()*/ ssi_balance_account).await {
             Ok(block_index) => {
                 log!(
                     P1,
-                    "Minted {amount} {token_name} for account {caller_account} corresponding to utxo {} with value {}",
+                    "Minted {amount} {token_name} for account {ssi_box_account} corresponding to utxo {} with value {}",
                     DisplayOutpoint(&utxo.outpoint),
                     DisplayAmount(utxo.value),
                 );
@@ -454,7 +453,7 @@ pub async fn update_balance(
                     state::audit::add_utxos(
                         s,
                         Some(block_index[0]),
-                        caller_account,
+                        ssi_box_account,
                         vec![utxo.clone()],
                     )
                 });
@@ -547,7 +546,7 @@ async fn kyt_check_utxo(
 }
 
 /// Mint an amount of SU$D to an Account & Lock the BTC collateral
-pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
+pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/ account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
     // debug_assert!(memo.0.len() <= crate::LEDGER_MEMO_SIZE as usize);
     let client = ICRC1Client {
         runtime: CdkRuntime,
@@ -571,15 +570,15 @@ pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/) -> Result<
             ))
         })??;
 
-    // @dev (susd)
+    // @dev SU$D
     let susd_client = ICRC1Client {
         runtime: CdkRuntime,
         ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
     };
     
-    // @xrc
+    // @dev XRC
     let xr = get_exchange_rate().await?.unwrap();
-    let susd: u64 = satoshis * xr.rate / 1_000_000_000 / 15 * 10; //@review (xrc) over-collateralization ratio (1.5)
+    let susd: u64 = satoshis * xr.rate / 1_000_000_000 / 15 * 10; //@review (mint) over-collateralization ratio (1.5)
 
     let block_index_susd = susd_client
         .transfer(TransferArg {
@@ -598,9 +597,26 @@ pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/) -> Result<
             ))
         })??;
 
+    let block_index_susd_bal = susd_client
+        .transfer(TransferArg {
+            from_subaccount: None,
+            to: account,
+            fee: None,
+            created_at_time: None,
+            memo: None,
+            amount: Nat::from(susd),
+        })
+        .await
+        .map_err(|(code, msg)| {
+            UpdateBalanceError::TemporarilyUnavailable(format!(
+                "cannot mint su$d: {} (reject_code = {})",
+                msg, code
+            ))
+        })??;
+
     // return Err(
     //     UpdateBalanceError::TemporarilyUnavailable(format!(
-    //         "satoshis: {}, xc: {}, su$d: {}",
+    //         "satoshis: {}, xr: {}, su$d: {}",
     //         satoshis, xr.rate, susd
     //     ))
     // );
@@ -611,6 +627,6 @@ pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/) -> Result<
         DisplayAmount(xr.rate),
     );
 
-    let res = [block_index.0.to_u64().expect("nat does not fit into u64"), block_index_susd.0.to_u64().expect("nat does not fit into u64")];
+    let res = [block_index.0.to_u64().expect("nat does not fit into u64"), block_index_susd.0.to_u64().expect("nat does not fit into u64"), block_index_susd_bal.0.to_u64().expect("nat does not fit into u64")];
     Ok(res.to_vec())
 }

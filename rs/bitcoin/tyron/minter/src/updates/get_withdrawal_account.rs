@@ -6,20 +6,19 @@ use super::get_btc_address::init_ecdsa_public_key;
 
 /// Deterministically computes a ckBTC Ledger account ID based on the ckBTC Minter’s principal ID and the caller’s principal ID.
 pub async fn get_withdrawal_account() -> Account {
-    let caller = PrincipalId(ic_cdk::caller());
     init_ecdsa_public_key().await;
-    let ck_btc_principal = ic_cdk::id();
-    let caller_subaccount: Subaccount = compute_subaccount(0, ""); // @review (burn) Deprecate get_withdrawal_account
+    let minter = ic_cdk::id();
+    let subaccount: Subaccount = compute_subaccount(0, ""); // @review (burn)
     // Check that the computed subaccount doesn't collide with minting account.
-    if &caller_subaccount == DEFAULT_SUBACCOUNT {
+    if &subaccount == DEFAULT_SUBACCOUNT {
         panic!(
             "Subaccount collision with principal {}. Please contact DFINITY support.",
-            caller
+            minter
         );
     }
     Account {
-        owner: ck_btc_principal,
-        subaccount: Some(caller_subaccount),
+        owner: minter,
+        subaccount: Some(subaccount),
     }
 }
 

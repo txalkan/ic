@@ -175,7 +175,7 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
     // @dev Get Safe-Deposit Box address
     let ecdsa_public_key = init_ecdsa_public_key().await;
     
-    let ssi_subaccount = compute_subaccount(1,ssi);
+    let ssi_subaccount = compute_subaccount(1, ssi);
     
     let box_address = account_to_bitcoin_address(
         &ecdsa_public_key,
@@ -460,7 +460,7 @@ async fn balance_of(ledger: SyronLedger, ssi: &str) -> Result<u64, RetrieveBtcEr
         }
     };
 
-    // @review (burn) The user must send BTC to a minter-controlled account (nonce 0) to withdraw BTC
+    // @review (burn) The user must send SU$D to a minter-specific SSI account (nonce 0) to withdraw BTC
     
     let subaccount = compute_subaccount(1, ssi);
     let result = client
@@ -486,7 +486,7 @@ async fn burn_ckbtcs(amount: u64, memo: Memo, ssi: &str) -> Result<u64, Retrieve
         ledger_canister_id: read_state(|s| s.ledger_id.get().into()),
     };
     let minter = ic_cdk::id();
-    let from_subaccount = compute_subaccount(1, ssi);
+    let from_subaccount = compute_subaccount(0, ssi);
     let result = client
         .transfer(TransferArg {
             from_subaccount: Some(from_subaccount),

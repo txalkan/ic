@@ -64,19 +64,19 @@ pub async fn get_box_address(args: GetBoxAddressArgs) -> String {
     init_ecdsa_public_key().await;
 
     let minter = ic_cdk::id();
-    let ssi_subaccount = compute_subaccount(1, &args.ssi);
+    let ssi_box_subaccount = compute_subaccount(1, &args.ssi);
 
-    let caller_account =  &Account {
+    let ssi_box_account =  &Account {
         owner: minter,
-        subaccount: Some(ssi_subaccount)//subaccount: args.subaccount,
+        subaccount: Some(ssi_box_subaccount)
     };
 
-    ic_cdk::println!("Account: {}", caller_account);
+    ic_cdk::println!("Account: {}", ssi_box_account);
 
     read_state(|s| {
         ssi_account_to_p2wpkh_address_from_state(
             s,
-            caller_account,
+            ssi_box_account,
             &args.ssi
         )
     })
