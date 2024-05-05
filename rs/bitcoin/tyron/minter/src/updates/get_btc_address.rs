@@ -64,7 +64,7 @@ pub async fn get_box_address(args: GetBoxAddressArgs) -> String {
     init_ecdsa_public_key().await;
 
     let minter = ic_cdk::id();
-    let ssi_box_subaccount = compute_subaccount(1, &args.ssi);
+    let ssi_box_subaccount: Subaccount = compute_subaccount(1, &args.ssi);
 
     let ssi_box_account =  &Account {
         owner: minter,

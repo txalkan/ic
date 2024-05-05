@@ -346,12 +346,12 @@ pub async fn update_ssi_balance(
 
     let new_utxos = state::read_state(|s| s.new_utxos_for_account(utxos, &ssi_box_account));
 
-    // Remove pending finalized transactions for the affected principal.
-    state::mutate_state(|s| s.finalized_utxos.remove(&ssi_box_account.owner));
+    // Remove pending finalized transactions for the minter. @review (mainnet) consider the user subaccount.
+    state::mutate_state(|s| s.finalized_utxos.remove(&minter));
 
-    let new_satoshis = new_utxos.iter().map(|u| u.value).sum::<u64>();
+    let btc_deposit = new_utxos.iter().map(|u| u.value).sum::<u64>();
 
-    if new_satoshis == 0 {
+    if btc_deposit == 0 {
         // We bail out early if there are no UTXOs to avoid creating a new entry
         // in the UTXOs map. If we allowed empty entries, malicious callers
         // could exhaust the canister memory.
@@ -545,7 +545,7 @@ async fn kyt_check_utxo(
     }
 }
 
-/// Mint an amount of SU$D to an Account & Lock the BTC collateral
+/// Registers the amount of locked BTC, the SU$D loan, and the SU$D balance.
 pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/ account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
     // debug_assert!(memo.0.len() <= crate::LEDGER_MEMO_SIZE as usize);
     let client = ICRC1Client {
@@ -592,7 +592,7 @@ pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/ account: Ac
         .await
         .map_err(|(code, msg)| {
             UpdateBalanceError::TemporarilyUnavailable(format!(
-                "cannot mint su$d: {} (reject_code = {})",
+                "cannot grant su$d loan: {} (reject_code = {})",
                 msg, code
             ))
         })??;
@@ -609,7 +609,7 @@ pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/ account: Ac
         .await
         .map_err(|(code, msg)| {
             UpdateBalanceError::TemporarilyUnavailable(format!(
-                "cannot mint su$d: {} (reject_code = {})",
+                "cannot update su$d balance: {} (reject_code = {})",
                 msg, code
             ))
         })??;

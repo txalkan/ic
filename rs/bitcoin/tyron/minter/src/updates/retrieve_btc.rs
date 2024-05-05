@@ -211,7 +211,7 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         ));
     }
 
-    let balance = balance_of(SyronLedger::BTC, ssi).await?;
+    let balance = balance_of(SyronLedger::BTC, ssi, 1).await?;
     if args.amount > balance {
         return Err(RetrieveBtcError::InsufficientFunds { balance });
     }
@@ -446,7 +446,7 @@ pub async fn retrieve_btc_with_approval(
     }
 }
 
-async fn balance_of(ledger: SyronLedger, ssi: &str) -> Result<u64, RetrieveBtcError> {
+pub async fn balance_of(ledger: SyronLedger, ssi: &str, nonce: u64) -> Result<u64, RetrieveBtcError> {
     let minter = ic_cdk::id();
 
     let client = match ledger {
@@ -460,9 +460,9 @@ async fn balance_of(ledger: SyronLedger, ssi: &str) -> Result<u64, RetrieveBtcEr
         }
     };
 
-    // @review (burn) The user must send SU$D to a minter-specific SSI account (nonce 0) to withdraw BTC
+    // @review (burn) Users must send SU$D to their safety deposit boxes to withdraw/redeem BTC.
     
-    let subaccount = compute_subaccount(1, ssi);
+    let subaccount = compute_subaccount(nonce, ssi);
     let result = client
         .balance_of(Account {
             owner: minter,
@@ -486,7 +486,7 @@ async fn burn_ckbtcs(amount: u64, memo: Memo, ssi: &str) -> Result<u64, Retrieve
         ledger_canister_id: read_state(|s| s.ledger_id.get().into()),
     };
     let minter = ic_cdk::id();
-    let from_subaccount = compute_subaccount(0, ssi);
+    let from_subaccount = compute_subaccount(1, ssi);
     let result = client
         .transfer(TransferArg {
             from_subaccount: Some(from_subaccount),
