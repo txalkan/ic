@@ -3,7 +3,7 @@ use crate::management::get_exchange_rate;
 use crate::memo::MintMemo;
 use crate::state::{mutate_state, read_state, UtxoCheckStatus};
 use crate::tasks::{schedule_now, TaskType};
-use candid::{CandidType, Deserialize, Nat, Principal};
+use candid::{error, CandidType, Deserialize, Nat, Principal};
 use ic_base_types::PrincipalId;
 use ic_btc_interface::{GetUtxosError, GetUtxosResponse, OutPoint, Utxo};
 use ic_canister_log::log;
@@ -628,5 +628,41 @@ pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/ account: Ac
     );
 
     let res = [block_index.0.to_u64().expect("nat does not fit into u64"), block_index_susd.0.to_u64().expect("nat does not fit into u64"), block_index_susd_bal.0.to_u64().expect("nat does not fit into u64")];
+    Ok(res.to_vec())
+}
+
+pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Vec<u64>, UpdateBalanceError> {
+    let susd_client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
+    };
+
+    let from_subaccount = Some(compute_subaccount(from, ssi));
+    let to_subaccount = compute_subaccount(to, ssi);
+    
+    let to_account = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(to_subaccount)
+    };
+
+    let block_index_susd = susd_client
+    .transfer(TransferArg {
+        from_subaccount,
+        to: to_account,
+        fee: None,
+        created_at_time: None,
+        memo: None,
+        amount: Nat::from(susd),
+    })
+    .await
+    .map_err(|(code, msg)| {
+        UpdateBalanceError::GenericError{
+            error_code: code as u64,
+            error_message: format!(
+            "cannot update su$d balance: {}",
+            msg)
+        }
+    })??;
+    let res = [block_index_susd.0.to_u64().expect("nat does not fit into u64")];
     Ok(res.to_vec())
 }
