@@ -322,91 +322,91 @@ pub async fn update_ssi_balance(
     let _guard = balance_update_guard(minter/*args.owner.unwrap_or(caller)*/)?;
 
     let ssi_box_subaccount = compute_subaccount(1, &args.ssi);
-    let ssi_balance_subaccount = compute_subaccount(2, &args.ssi);
-    
-    let ssi_box_account = Account {
-        owner: minter,
-        subaccount: Some(ssi_box_subaccount)
-    };
-
-    let ssi_balance_account = Account {
-        owner: minter,
-        subaccount: Some(ssi_balance_subaccount)
-    };
-
-    let box_address = state::read_state(|s| {
-        get_btc_address::ssi_account_to_p2wpkh_address_from_state(s, &ssi_box_account, &args.ssi)
-    });
-
-    let (btc_network, min_confirmations) =
-        state::read_state(|s| (s.btc_network, s.min_confirmations));
-
-    let utxos = get_utxos(btc_network, &box_address, min_confirmations, CallSource::Client)
-        .await?
-        .utxos;
-
-    let new_utxos = state::read_state(|s| s.new_utxos_for_account(utxos, &ssi_box_account));
-
-    // Remove pending finalized transactions for the minter. @review (mainnet) consider the user subaccount.
-    state::mutate_state(|s| s.finalized_utxos.remove(&minter));
-
-    let btc_deposit = new_utxos.iter().map(|u| u.value).sum::<u64>();
-
-    if btc_deposit == 0 {
-        // We bail out early if there are no UTXOs to avoid creating a new entry
-        // in the UTXOs map. If we allowed empty entries, malicious callers
-        // could exhaust the canister memory.
-
-        // We get the entire list of UTXOs again with a zero
-        // confirmation limit so that we can indicate the approximate
-        // wait time to the caller.
-        let GetUtxosResponse {
-            tip_height,
-            mut utxos,
-            ..
-        } = get_utxos(
-            btc_network,
-            &box_address,
-            /*min_confirmations=*/ 0,
-            CallSource::Client,
-        )
-        .await?;
-
-        utxos.retain(|u| {
-            tip_height
-                < u.height
-                    .checked_add(min_confirmations)
-                    .expect("bug: this shouldn't overflow")
-                    .checked_sub(1)
-                    .expect("bug: this shouldn't underflow")
-        });
-        let pending_utxos: Vec<PendingUtxo> = utxos
-            .iter()
-            .map(|u| PendingUtxo {
-                outpoint: u.outpoint.clone(),
-                value: u.value,
-                confirmations: tip_height - u.height + 1,
-            })
-            .collect();
-
-        let current_confirmations = pending_utxos.iter().map(|u| u.confirmations).max();
-
-        return Err(UpdateBalanceError::NoNewUtxos {
-            current_confirmations,
-            required_confirmations: min_confirmations,
-            pending_utxos: Some(pending_utxos),
-        });
-    }
-
-    let token_name = match btc_network {
-        ic_management_canister_types::BitcoinNetwork::Mainnet => "SU$D",
-        _ => "tSU$D",
-    };
 
     let mut utxo_statuses: Vec<UtxoStatus> = vec![];
-    
+
     match args.op {
         SyronOperation::GetSyron => {
+            let ssi_box_account = Account {
+                owner: minter,
+                subaccount: Some(ssi_box_subaccount)
+            };
+            
+            let ssi_balance_subaccount = compute_subaccount(2, &args.ssi);
+            let ssi_balance_account = Account {
+                owner: minter,
+                subaccount: Some(ssi_balance_subaccount)
+            };
+        
+            let box_address = state::read_state(|s| {
+                get_btc_address::ssi_account_to_p2wpkh_address_from_state(s, &ssi_box_account, &args.ssi)
+            });
+        
+            let (btc_network, min_confirmations) =
+                state::read_state(|s| (s.btc_network, s.min_confirmations));
+        
+            let utxos = get_utxos(btc_network, &box_address, min_confirmations, CallSource::Client)
+                .await?
+                .utxos;
+        
+            let new_utxos = state::read_state(|s| s.new_utxos_for_account(utxos, &ssi_box_account));
+        
+            // Remove pending finalized transactions for the minter. @review (mainnet) consider the user subaccount.
+            state::mutate_state(|s| s.finalized_utxos.remove(&minter));
+        
+            let btc_deposit = new_utxos.iter().map(|u| u.value).sum::<u64>();
+        
+            if btc_deposit == 0 {
+                // We bail out early if there are no UTXOs to avoid creating a new entry
+                // in the UTXOs map. If we allowed empty entries, malicious callers
+                // could exhaust the canister memory.
+        
+                // We get the entire list of UTXOs again with a zero
+                // confirmation limit so that we can indicate the approximate
+                // wait time to the caller.
+                let GetUtxosResponse {
+                    tip_height,
+                    mut utxos,
+                    ..
+                } = get_utxos(
+                    btc_network,
+                    &box_address,
+                    /*min_confirmations=*/ 0,
+                    CallSource::Client,
+                )
+                .await?;
+        
+                utxos.retain(|u| {
+                    tip_height
+                        < u.height
+                            .checked_add(min_confirmations)
+                            .expect("bug: this shouldn't overflow")
+                            .checked_sub(1)
+                            .expect("bug: this shouldn't underflow")
+                });
+                let pending_utxos: Vec<PendingUtxo> = utxos
+                    .iter()
+                    .map(|u| PendingUtxo {
+                        outpoint: u.outpoint.clone(),
+                        value: u.value,
+                        confirmations: tip_height - u.height + 1,
+                    })
+                    .collect();
+        
+                let current_confirmations = pending_utxos.iter().map(|u| u.confirmations).max();
+        
+                return Err(UpdateBalanceError::NoNewUtxos {
+                    current_confirmations,
+                    required_confirmations: min_confirmations,
+                    pending_utxos: Some(pending_utxos),
+                });
+            }
+        
+            let token_name = match btc_network {
+                ic_management_canister_types::BitcoinNetwork::Mainnet => "SU$D",
+                _ => "tSU$D",
+            };
+
             let kyt_fee = read_state(|s| s.kyt_fee);
         
             for utxo in new_utxos {

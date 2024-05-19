@@ -141,7 +141,6 @@ pub fn derive_ssi_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Accoun
         derived_chain_code,
     } = DerivationPath::new(
         get_ssi_derivation_path(account, ssi)
-       
     )
     .public_key_derivation(&ecdsa_public_key.public_key, &ecdsa_public_key.chain_code)
     .expect("bug: failed to derive an ECDSA public key from valid inputs");
