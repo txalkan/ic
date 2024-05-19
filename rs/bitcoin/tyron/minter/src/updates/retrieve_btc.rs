@@ -330,13 +330,17 @@ pub async fn retrieve_btc_with_approval(
     }
 
     let _guard = retrieve_btc_guard(caller)?;
+    
     let (min_retrieve_amount, btc_network, kyt_fee) =
         read_state(|s| (s.retrieve_btc_min_amount, s.btc_network, s.kyt_fee));
+    
     let min_amount = max(min_retrieve_amount, kyt_fee);
+    
     if args.amount < min_amount {
         return Err(RetrieveBtcWithApprovalError::AmountTooLow(min_amount));
     }
     let parsed_address = BitcoinAddress::parse(&args.address, btc_network)?;
+    
     if read_state(|s| s.count_incomplete_retrieve_btc_requests() >= MAX_CONCURRENT_PENDING_REQUESTS)
     {
         return Err(RetrieveBtcWithApprovalError::TemporarilyUnavailable(

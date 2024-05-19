@@ -18,9 +18,18 @@ pub struct GetBtcAddressArgs {
     pub subaccount: Option<Subaccount>,
 }
 
+#[derive(CandidType, Clone, Copy, Deserialize, Debug, Eq, PartialEq, Serialize, Hash)]
+pub enum SyronOperation {
+    #[serde(rename = "getsyron")]
+    GetSyron,
+    #[serde(rename = "redeembitcoin")]
+    RedeemBitcoin
+}
+
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GetBoxAddressArgs {
-    pub ssi: String
+    pub ssi: String,
+    pub op: SyronOperation
 }
 
 /// PRECONDITION: s.ecdsa_public_key.is_some()

@@ -128,15 +128,20 @@ pub fn derive_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Account) -
     }
 }
 
+pub fn get_ssi_derivation_path(account: &Account, ssi: &str) -> Vec<DerivationIndex> {
+    ssi_derivation_path(account, ssi)
+    .into_iter()
+    .map(|x| DerivationIndex(x.into_vec()))
+    .collect()
+}
+
 pub fn derive_ssi_public_key(ecdsa_public_key: &ECDSAPublicKey, account: &Account, ssi: &str) -> ECDSAPublicKey {
     let ExtendedBip32DerivationOutput {
         derived_public_key,
         derived_chain_code,
     } = DerivationPath::new(
-        ssi_derivation_path(account, ssi)
-            .into_iter()
-            .map(|x| DerivationIndex(x.into_vec()))
-            .collect(),
+        get_ssi_derivation_path(account, ssi)
+       
     )
     .public_key_derivation(&ecdsa_public_key.public_key, &ecdsa_public_key.chain_code)
     .expect("bug: failed to derive an ECDSA public key from valid inputs");

@@ -14,8 +14,9 @@ use icrc_ledger_types::icrc1::account::{Account, Subaccount};
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use num_traits::ToPrimitive;
 use serde::Serialize;
-use super::get_btc_address::{init_ecdsa_public_key, GetBoxAddressArgs};
+use super::get_btc_address::{init_ecdsa_public_key, GetBoxAddressArgs, SyronOperation};
 use super::get_withdrawal_account::compute_subaccount;
+use super::retrieve_btc::{balance_of, SyronLedger};
 use crate::{
     guard::{balance_update_guard, GuardError},
     management::{fetch_utxo_alerts, get_utxos, CallError, CallSource},
@@ -402,87 +403,147 @@ pub async fn update_ssi_balance(
         _ => "tSU$D",
     };
 
-    let kyt_fee = read_state(|s| s.kyt_fee);
     let mut utxo_statuses: Vec<UtxoStatus> = vec![];
-    for utxo in new_utxos {
-        if utxo.value <= kyt_fee {
-            mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
-            log!(
-                P1,
-                "Ignored UTXO {} for account {ssi_box_account} because UTXO value {} is lower than the KYT fee {}",
-                DisplayOutpoint(&utxo.outpoint),
-                DisplayAmount(utxo.value),
-                DisplayAmount(kyt_fee),
-            );
-            utxo_statuses.push(UtxoStatus::ValueTooSmall(utxo));
-            continue;
-        }
-
-        // @review (inscription)
-        if utxo.value == 546 {
-            mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
-            utxo_statuses.push(UtxoStatus::TransferInscription(utxo));
-            continue;
-        }
-
-        // @review (kyt)
-        // let (uuid, status, kyt_provider) = kyt_check_utxo(caller_account.owner, &utxo).await?;
-        // mutate_state(|s| {
-        //     crate::state::audit::mark_utxo_checked(s, &utxo, uuid.clone(), status, kyt_provider);
-        // });
-        // if status == UtxoCheckStatus::Tainted {
-        //     utxo_statuses.push(UtxoStatus::Tainted(utxo.clone()));
-        //     continue;
-        // }
-        let amount = utxo.value - kyt_fee;
-        let memo = MintMemo::Convert {
-            txid: Some(utxo.outpoint.txid.as_ref()),
-            vout: Some(utxo.outpoint.vout),
-            kyt_fee: Some(kyt_fee),
-        };
-
-        match mint(amount, ssi_box_account, /*crate::memo::encode(&memo).into()*/ ssi_balance_account).await {
-            Ok(block_index) => {
-                log!(
-                    P1,
-                    "Minted {amount} {token_name} for account {ssi_box_account} corresponding to utxo {} with value {}",
-                    DisplayOutpoint(&utxo.outpoint),
-                    DisplayAmount(utxo.value),
-                );
-                state::mutate_state(|s| {
-                    state::audit::add_utxos(
-                        s,
-                        Some(block_index[0]),
-                        ssi_box_account,
-                        vec![utxo.clone()],
-                    )
-                });
-                utxo_statuses.push(UtxoStatus::Minted {
-                    block_index: block_index[0],
-                    utxo,
-                    minted_amount: amount,
-                });
+    
+    match args.op {
+        SyronOperation::GetSyron => {
+            let kyt_fee = read_state(|s| s.kyt_fee);
+        
+            for utxo in new_utxos {
+                if utxo.value <= kyt_fee {
+                    mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
+                    log!(
+                        P1,
+                        "Ignored UTXO {} for account {ssi_box_account} because UTXO value {} is lower than the KYT fee {}",
+                        DisplayOutpoint(&utxo.outpoint),
+                        DisplayAmount(utxo.value),
+                        DisplayAmount(kyt_fee),
+                    );
+                    utxo_statuses.push(UtxoStatus::ValueTooSmall(utxo));
+                    continue;
+                }
+        
+                // @review (inscription)
+                if utxo.value == 546 {
+                    mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
+                    utxo_statuses.push(UtxoStatus::TransferInscription(utxo));
+                    continue;
+                }
+        
+                // @review (kyt)
+                // let (uuid, status, kyt_provider) = kyt_check_utxo(caller_account.owner, &utxo).await?;
+                // mutate_state(|s| {
+                //     crate::state::audit::mark_utxo_checked(s, &utxo, uuid.clone(), status, kyt_provider);
+                // });
+                // if status == UtxoCheckStatus::Tainted {
+                //     utxo_statuses.push(UtxoStatus::Tainted(utxo.clone()));
+                //     continue;
+                // }
+                let amount = utxo.value - kyt_fee;
+                let memo = MintMemo::Convert {
+                    txid: Some(utxo.outpoint.txid.as_ref()),
+                    vout: Some(utxo.outpoint.vout),
+                    kyt_fee: Some(kyt_fee),
+                };
+        
+                match mint(amount, ssi_box_account, /*crate::memo::encode(&memo).into()*/ ssi_balance_account).await {
+                    Ok(block_index) => {
+                        log!(
+                            P1,
+                            "Minted {amount} {token_name} for account {ssi_box_account} corresponding to utxo {} with value {}",
+                            DisplayOutpoint(&utxo.outpoint),
+                            DisplayAmount(utxo.value),
+                        );
+                        state::mutate_state(|s| {
+                            state::audit::add_utxos(
+                                s,
+                                Some(block_index[0]),
+                                ssi_box_account,
+                                vec![utxo.clone()],
+                            )
+                        });
+                        utxo_statuses.push(UtxoStatus::Minted {
+                            block_index: block_index[0],
+                            utxo,
+                            minted_amount: amount,
+                        });
+                    }
+                    Err(err) => {
+                        log!(
+                            P0,
+                            "Failed to mint for UTXO {}: {:?}",
+                            DisplayOutpoint(&utxo.outpoint),
+                            err
+                        );
+                        utxo_statuses.push(UtxoStatus::Checked(utxo));
+                    }
+                }
             }
-            Err(err) => {
-                log!(
-                    P0,
-                    "Failed to mint ckBTC for UTXO {}: {:?}",
-                    DisplayOutpoint(&utxo.outpoint),
-                    err
-                );
-                utxo_statuses.push(UtxoStatus::Checked(utxo));
-            }
+        
+            // let res = match mint(satoshis_to_mint, caller_account).await {
+            //     Ok(res) => Ok(utxo_statuses),
+            //     Err(res) => Err(res)
+            // };
+            // return res
+        },
+        SyronOperation::RedeemBitcoin => {
+            let minter_account = Account{
+                owner: minter,
+                subaccount: None
+            };
+
+            let btc_1 = balance_of(SyronLedger::BTC, &args.ssi, 1).await.unwrap();
+            let susd_1 = balance_of(SyronLedger::SUSD, &args.ssi, 1).await.unwrap();
+    
+            // Syron BTC Ledger
+            let client = ICRC1Client {
+                runtime: CdkRuntime,
+                ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
+            };
+        
+            let block_index = client
+                .transfer(TransferArg {
+                    from_subaccount: Some(ssi_box_subaccount),
+                    to: minter_account,
+                    fee: None,
+                    created_at_time: None,
+                    memo: None,//Some(memo),
+                    amount: Nat::from(btc_1),
+                })
+                .await
+                .map_err(|(code, msg)| {
+                    UpdateBalanceError::TemporarilyUnavailable(format!(
+                        "cannot mint ckbtc: {} (reject_code = {})",
+                        msg, code
+                    ))
+                })??;
+        
+            // Syron SU$D Ledger
+            let susd_client = ICRC1Client {
+                runtime: CdkRuntime,
+                ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
+            };
+
+            let block_index_susd = susd_client
+            .transfer(TransferArg {
+                from_subaccount: Some(ssi_box_subaccount),
+                to: minter_account,
+                fee: None,
+                created_at_time: None,
+                memo: None,
+                amount: Nat::from(susd_1),
+            })
+            .await
+            .map_err(|(code, msg)| {
+                UpdateBalanceError::TemporarilyUnavailable(format!(
+                    "cannot grant su$d loan: {} (reject_code = {})",
+                    msg, code
+                ))
+            })??;
         }
     }
-
     schedule_now(TaskType::ProcessLogic);
-    
-    // let res = match mint(satoshis_to_mint, caller_account).await {
-    //     Ok(res) => Ok(utxo_statuses),
-    //     Err(res) => Err(res)
-    // };
-    // return res
-    
+        
     Ok(utxo_statuses)
 }
 
