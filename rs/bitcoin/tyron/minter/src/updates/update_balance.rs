@@ -60,6 +60,7 @@ pub enum UtxoStatus {
 
 pub enum ErrorCode {
     ConfigurationError = 1,
+    UnsupportedOperation = 2,
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -446,7 +447,7 @@ pub async fn update_ssi_balance(
                     kyt_fee: Some(kyt_fee),
                 };
         
-                match mint(amount, ssi_box_account, /*crate::memo::encode(&memo).into()*/ ssi_balance_account).await {
+                match mint(&args.ssi, amount, ssi_box_account, /*crate::memo::encode(&memo).into()*/ ssi_balance_account).await {
                     Ok(block_index) => {
                         log!(
                             P1,
@@ -540,6 +541,13 @@ pub async fn update_ssi_balance(
                     msg, code
                 ))
             })??;
+        },
+        SyronOperation::Liquidation => {
+            // invalid operation, throw error
+            return Err(UpdateBalanceError::GenericError {  
+                error_code: ErrorCode::UnsupportedOperation as u64,
+                error_message: "Invalid operation".to_string()
+            });
         }
     }
     schedule_now(TaskType::ProcessLogic);
@@ -607,14 +615,47 @@ async fn kyt_check_utxo(
 }
 
 /// Registers the amount of locked BTC, the SU$D loan, and the SU$D balance.
-pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/ account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
+pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, /*memo: Memo,*/ account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
+    // @dev XRC
+    let xr = get_exchange_rate().await?.unwrap();
+    let exchange_rate = xr.rate / 1_000_000_000;
+
+    // @notice We assume that the current collateral ratio is >= 15,000 basis points.
+    let mut susd: u64 = satoshis * exchange_rate / 15 * 10; //@review (mint) over-collateralization ratio (1.5)
+
+    let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap();
+    let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap();
+
+    let collateral_ratio = if btc_1 == 0 {
+        15000 // 150%
+    } else {
+        btc_1 * exchange_rate / susd_1 * 10000
+    };
+
+    // if the collateral ratio is less than 15000 basis points, then the user cannot withdraw susd amount, can withdraw an amount of susd so that the collateral ratio is at least 15000 basis points
+    if collateral_ratio < 15000 {
+        // calculate the amount of satoshis required so that the collateral ratio is at least 15000 basis points
+        let sats = (15000 * susd_1 / exchange_rate - btc_1).max(0);
+
+        let accepted_deposit = (satoshis - sats).max(0);
+
+        // calculate the maximum amount of susd that can be withdrawn
+        if accepted_deposit > 0 {
+            // @runes
+            // susd = accepted_deposit * exchange_rate / 15 * 10;
+        } else {
+            // all satoshis are deposited but no new SUSD can be minted
+            susd = 0;
+        }
+    }
+
     // debug_assert!(memo.0.len() <= crate::LEDGER_MEMO_SIZE as usize);
     let client = ICRC1Client {
         runtime: CdkRuntime,
         ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
     };
 
-    let block_index = client
+    let block_index_btc1 = client
         .transfer(TransferArg {
             from_subaccount: None,
             to,
@@ -626,70 +667,74 @@ pub(crate) async fn mint(satoshis: u64, to: Account, /*memo: Memo,*/ account: Ac
         .await
         .map_err(|(code, msg)| {
             UpdateBalanceError::TemporarilyUnavailable(format!(
-                "cannot mint ckbtc: {} (reject_code = {})",
+                "cannot account ckbtc: {} (reject_code = {})",
                 msg, code
             ))
         })??;
 
-    // @dev SU$D
-    let susd_client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
-    };
+    let mut res: Vec<u64> = Vec::new();
+    res.push(block_index_btc1.0.to_u64().expect("nat does not fit into u64"));
+
+    if susd != 0 {
+        // @dev SU$D
     
-    // @dev XRC
-    let xr = get_exchange_rate().await?.unwrap();
-    let susd: u64 = satoshis * xr.rate / 1_000_000_000 / 15 * 10; //@review (mint) over-collateralization ratio (1.5)
+        let susd_client = ICRC1Client {
+            runtime: CdkRuntime,
+            ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
+        };
 
-    let block_index_susd = susd_client
-        .transfer(TransferArg {
-            from_subaccount: None,
-            to,
-            fee: None,
-            created_at_time: None,
-            memo: None,
-            amount: Nat::from(susd),
-        })
-        .await
-        .map_err(|(code, msg)| {
-            UpdateBalanceError::TemporarilyUnavailable(format!(
-                "cannot grant su$d loan: {} (reject_code = {})",
-                msg, code
-            ))
-        })??;
+        let block_index_susd1 = susd_client
+            .transfer(TransferArg {
+                from_subaccount: None,
+                to,
+                fee: None,
+                created_at_time: None,
+                memo: None,
+                amount: Nat::from(susd),
+            })
+            .await
+            .map_err(|(code, msg)| {
+                UpdateBalanceError::TemporarilyUnavailable(format!(
+                    "cannot grant su$d loan: {} (reject_code = {})",
+                    msg, code
+                ))
+            })??;
 
-    let block_index_susd_bal = susd_client
-        .transfer(TransferArg {
-            from_subaccount: None,
-            to: account,
-            fee: None,
-            created_at_time: None,
-            memo: None,
-            amount: Nat::from(susd),
-        })
-        .await
-        .map_err(|(code, msg)| {
-            UpdateBalanceError::TemporarilyUnavailable(format!(
-                "cannot update su$d balance: {} (reject_code = {})",
-                msg, code
-            ))
-        })??;
+        let block_index_susd2 = susd_client
+            .transfer(TransferArg {
+                from_subaccount: None,
+                to: account,
+                fee: None,
+                created_at_time: None,
+                memo: None,
+                amount: Nat::from(susd),
+            })
+            .await
+            .map_err(|(code, msg)| {
+                UpdateBalanceError::TemporarilyUnavailable(format!(
+                    "cannot update su$d balance: {} (reject_code = {})",
+                    msg, code
+                ))
+            })??;
 
-    // return Err(
-    //     UpdateBalanceError::TemporarilyUnavailable(format!(
-    //         "satoshis: {}, xr: {}, su$d: {}",
-    //         satoshis, xr.rate, susd
-    //     ))
-    // );
-    
-    log!(
-        P0,
-        "Minted {susd} SU$D with {satoshis} BTC for account {to} at XR: {}",
-        DisplayAmount(xr.rate),
-    );
+        // return Err(
+        //     UpdateBalanceError::TemporarilyUnavailable(format!(
+        //         "satoshis: {}, xr: {}, su$d: {}",
+        //         satoshis, xr.rate, susd
+        //     ))
+        // );
+        
+        log!(
+            P0,
+            "Minted {susd} SU$D with {satoshis} BTC for account {to} at XR: {}",
+            DisplayAmount(xr.rate),
+        );
 
-    let res = [block_index.0.to_u64().expect("nat does not fit into u64"), block_index_susd.0.to_u64().expect("nat does not fit into u64"), block_index_susd_bal.0.to_u64().expect("nat does not fit into u64")];
-    Ok(res.to_vec())
+        res.push(block_index_susd1.0.to_u64().expect("nat does not fit into u64"));
+        res.push(block_index_susd2.0.to_u64().expect("nat does not fit into u64"));
+    }
+
+    Ok(res)
 }
 
 pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Vec<u64>, UpdateBalanceError> {
@@ -724,6 +769,7 @@ pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Ve
             msg)
         }
     })??;
+    
     let res = [block_index_susd.0.to_u64().expect("nat does not fit into u64")];
     Ok(res.to_vec())
 }

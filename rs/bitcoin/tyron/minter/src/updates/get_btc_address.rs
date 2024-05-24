@@ -23,7 +23,9 @@ pub enum SyronOperation {
     #[serde(rename = "getsyron")]
     GetSyron,
     #[serde(rename = "redeembitcoin")]
-    RedeemBitcoin
+    RedeemBitcoin,
+    #[serde(rename = "liquidation")]
+    Liquidation
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

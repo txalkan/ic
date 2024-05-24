@@ -437,35 +437,35 @@ fn finalized_txids(candidates: &[state::SubmittedBtcTransaction], new_utxos: &[U
 }
 
 // @review (kyt)
-async fn reimburse_failed_kyt() {
-    let try_to_reimburse = state::read_state(|s| s.pending_reimbursements.clone());
-    for (burn_block_index, entry) in try_to_reimburse {
-        let (memo_status, kyt_fee) = match entry.reason {
-            ReimbursementReason::TaintedDestination { kyt_fee, .. } => (Status::Rejected, kyt_fee),
-            ReimbursementReason::CallFailed => (Status::CallFailed, 0),
-        };
-        // let reimburse_memo = crate::memo::MintMemo::KytFail {
-        //     kyt_fee: Some(kyt_fee),
-        //     status: Some(memo_status),
-        //     associated_burn_index: Some(burn_block_index),
-        // };
-        if let Ok(block_index) = crate::updates::update_balance::mint(
-            entry
-                .amount
-                .checked_sub(kyt_fee)
-                .expect("reimburse underflow"),
-            entry.account,
-            /*crate::memo::encode(&reimburse_memo).into(),*/
-            entry.account // @review (kyt)
-        )
-        .await
-        {
-            state::mutate_state(|s| {
-                state::audit::reimbursed_failed_deposit(s, burn_block_index, block_index[0])
-            });
-        }
-    }
-}
+// async fn reimburse_failed_kyt() {
+//     let try_to_reimburse = state::read_state(|s| s.pending_reimbursements.clone());
+//     for (burn_block_index, entry) in try_to_reimburse {
+//         let (memo_status, kyt_fee) = match entry.reason {
+//             ReimbursementReason::TaintedDestination { kyt_fee, .. } => (Status::Rejected, kyt_fee),
+//             ReimbursementReason::CallFailed => (Status::CallFailed, 0),
+//         };
+//         // let reimburse_memo = crate::memo::MintMemo::KytFail {
+//         //     kyt_fee: Some(kyt_fee),
+//         //     status: Some(memo_status),
+//         //     associated_burn_index: Some(burn_block_index),
+//         // };
+//         if let Ok(block_index) = crate::updates::update_balance::mint(
+//             entry
+//                 .amount
+//                 .checked_sub(kyt_fee)
+//                 .expect("reimburse underflow"),
+//             entry.account,
+//             /*crate::memo::encode(&reimburse_memo).into(),*/
+//             entry.account // @review (kyt)
+//         )
+//         .await
+//         {
+//             state::mutate_state(|s| {
+//                 state::audit::reimbursed_failed_deposit(s, burn_block_index, block_index[0])
+//             });
+//         }
+//     }
+// }
 
 async fn finalize_requests() {
     if state::read_state(|s| s.submitted_transactions.is_empty()) {
@@ -1193,7 +1193,7 @@ pub fn timer() {
 
                 submit_pending_requests().await;
                 finalize_requests().await;
-                reimburse_failed_kyt().await;
+                // reimburse_failed_kyt().await;
             });
         }
         TaskType::RefreshFeePercentiles => {
