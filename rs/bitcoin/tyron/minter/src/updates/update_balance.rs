@@ -647,7 +647,7 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
     // if the collateral ratio is less than 15000 basis points, then the user cannot withdraw susd amount, can withdraw an amount of susd so that the collateral ratio is at least 15000 basis points
     if collateralized_account.collateral_ratio < 15000 {
         // calculate the amount of satoshis required so that the collateral ratio is at least 15000 basis points
-        let sats = (15/10 * collateralized_account.susd_1 / exchange_rate - collateralized_account.btc_1).max(0);
+        let sats = ((1.5 * collateralized_account.susd_1 as f64 / exchange_rate as f64) as u64 - collateralized_account.btc_1).max(0);
 
         let accepted_deposit = (satoshis - sats).max(0);
 
@@ -798,7 +798,7 @@ pub async fn get_collateralized_account(ssi: &str) -> Result<CollateralizedAccou
     } else if susd_1 == 0 {
         0
     } else {
-        btc_1 * exchange_rate / susd_1 * 10000
+        ((btc_1 as f64 * exchange_rate as f64 / susd_1 as f64) * 10000.0) as u64
     };
 
     Ok(CollateralizedAccount{
