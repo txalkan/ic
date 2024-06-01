@@ -134,6 +134,14 @@ impl From<ExchangeRateError> for UpdateBalanceError {
     }
 }
 
+#[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CollateralizedAccount {
+    exchange_rate: u64,
+    pub collateral_ratio: u64,
+    pub btc_1: u64,
+    pub susd_1: u64
+}
+
 /// Notifies the ckBTC minter to update the balance of the user subaccount.
 // pub async fn update_balance(
 //     args: UpdateBalanceArgs,
@@ -630,22 +638,16 @@ async fn _kyt_check_utxo(
 
 /// Registers the amount of locked BTC, the SU$D loan, and the SU$D balance.
 pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
-    // @dev XRC
-    let xr = get_exchange_rate().await??;
-    let exchange_rate = xr.rate / 1_000_000_000;
+    let collateralized_account = get_collateralized_account(ssi).await?;
+    let exchange_rate = collateralized_account.exchange_rate;
 
     // @notice We assume that the current collateral ratio is >= 15,000 basis points.
     let mut susd: u64 = satoshis * exchange_rate / 15 * 10; //@review (mint) over-collateralization ratio (1.5)
 
-    let collateral_ratio = get_collateral_ratio(ssi).await?;
-
     // if the collateral ratio is less than 15000 basis points, then the user cannot withdraw susd amount, can withdraw an amount of susd so that the collateral ratio is at least 15000 basis points
-    if collateral_ratio < 15000 {
-        let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
-        let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
-
+    if collateralized_account.collateral_ratio < 15000 {
         // calculate the amount of satoshis required so that the collateral ratio is at least 15000 basis points
-        let sats = (15/10 * susd_1 / exchange_rate - btc_1).max(0);
+        let sats = (15/10 * collateralized_account.susd_1 / exchange_rate - collateralized_account.btc_1).max(0);
 
         let accepted_deposit = (satoshis - sats).max(0);
 
@@ -736,8 +738,8 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
         
         log!(
             P0,
-            "Minted {susd} SU$D with {satoshis} BTC for account {to} at XR: {}",
-            DisplayAmount(xr.rate),
+            "Minted {susd} (SUSD) with {satoshis} (BTC) for account {to} at XR: {}",
+            DisplayAmount(exchange_rate),
         );
 
         res.push(block_index_susd1.0.to_u64().expect("nat does not fit into u64"));
@@ -784,7 +786,7 @@ pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Ve
     Ok(res.to_vec())
 }
 
-pub async fn get_collateral_ratio(ssi: &str) -> Result<u64, UpdateBalanceError> {
+pub async fn get_collateralized_account(ssi: &str) -> Result<CollateralizedAccount, UpdateBalanceError> {
     let xr = get_exchange_rate().await??;
     let exchange_rate = xr.rate / 1_000_000_000;
 
@@ -799,5 +801,10 @@ pub async fn get_collateral_ratio(ssi: &str) -> Result<u64, UpdateBalanceError> 
         btc_1 * exchange_rate / susd_1 * 10000
     };
 
-    Ok(collateral_ratio)
+    Ok(CollateralizedAccount{
+        exchange_rate,
+        collateral_ratio,
+        btc_1,
+        susd_1
+    })
 }
