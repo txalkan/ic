@@ -3,14 +3,14 @@ use crate::management::get_exchange_rate;
 use crate::memo::MintMemo;
 use crate::state::{mutate_state, read_state, UtxoCheckStatus};
 use crate::tasks::{schedule_now, TaskType};
-use candid::{error, CandidType, Deserialize, Nat, Principal};
-use ic_base_types::PrincipalId;
+use candid::{CandidType, Deserialize, Nat, Principal};
 use ic_btc_interface::{GetUtxosError, GetUtxosResponse, OutPoint, Utxo};
 use ic_canister_log::log;
 use ic_ckbtc_kyt::Error as KytError;
+use ic_xrc_types::ExchangeRateError;
 use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
 use icrc_ledger_types::icrc1::account::{Account, Subaccount};
-// use icrc_ledger_types::icrc1::transfer::Memo;
+use icrc_ledger_types::icrc1::transfer::Memo;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use num_traits::ToPrimitive;
 use serde::Serialize;
@@ -125,6 +125,12 @@ impl From<TransferError> for UpdateBalanceError {
 impl From<CallError> for UpdateBalanceError {
     fn from(e: CallError) -> Self {
         Self::TemporarilyUnavailable(e.to_string())
+    }
+}
+
+impl From<ExchangeRateError> for UpdateBalanceError {
+    fn from(e: ExchangeRateError) -> Self {
+        Self::TemporarilyUnavailable(format!("failed to fetch the current exchange rate: {:?}", e))
     }
 }
 
@@ -447,7 +453,7 @@ pub async fn update_ssi_balance(
                     kyt_fee: Some(kyt_fee),
                 };
         
-                match mint(&args.ssi, amount, ssi_box_account, /*crate::memo::encode(&memo).into()*/ ssi_balance_account).await {
+                match mint(&args.ssi, amount, ssi_box_account, crate::memo::encode(&memo).into(), ssi_balance_account).await {
                     Ok(block_index) => {
                         log!(
                             P1,
@@ -493,22 +499,30 @@ pub async fn update_ssi_balance(
                 subaccount: None
             };
 
-            let btc_1 = balance_of(SyronLedger::BTC, &args.ssi, 1).await.unwrap();
-            let susd_1 = balance_of(SyronLedger::SUSD, &args.ssi, 1).await.unwrap();
+            let btc_1 = balance_of(SyronLedger::BTC, &args.ssi, 1).await.unwrap_or(0);
+            let susd_1 = balance_of(SyronLedger::SUSD, &args.ssi, 1).await.unwrap_or(0);
     
+            // @dev Throw an error if any of the balances is zero
+            if btc_1 == 0 || susd_1 == 0 {
+                return Err(UpdateBalanceError::GenericError {
+                    error_code: ErrorCode::UnsupportedOperation as u64,
+                    error_message: "Invalid balance to redeem BTC".to_string()
+                });
+            }
+
             // Syron BTC Ledger
-            let client = ICRC1Client {
+            let sbtc_client = ICRC1Client {
                 runtime: CdkRuntime,
                 ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
             };
         
-            let block_index = client
+            sbtc_client
                 .transfer(TransferArg {
                     from_subaccount: Some(ssi_box_subaccount),
                     to: minter_account,
                     fee: None,
                     created_at_time: None,
-                    memo: None,//Some(memo),
+                    memo: None,
                     amount: Nat::from(btc_1),
                 })
                 .await
@@ -525,7 +539,7 @@ pub async fn update_ssi_balance(
                 ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
             };
 
-            let block_index_susd = susd_client
+            susd_client
             .transfer(TransferArg {
                 from_subaccount: Some(ssi_box_subaccount),
                 to: minter_account,
@@ -555,7 +569,7 @@ pub async fn update_ssi_balance(
     Ok(utxo_statuses)
 }
 
-async fn kyt_check_utxo(
+async fn _kyt_check_utxo(
     caller: Principal,
     utxo: &Utxo,
 ) -> Result<(String, UtxoCheckStatus, Principal), UpdateBalanceError> {
@@ -615,27 +629,23 @@ async fn kyt_check_utxo(
 }
 
 /// Registers the amount of locked BTC, the SU$D loan, and the SU$D balance.
-pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, /*memo: Memo,*/ account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
+pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
     // @dev XRC
-    let xr = get_exchange_rate().await?.unwrap();
+    let xr = get_exchange_rate().await??;
     let exchange_rate = xr.rate / 1_000_000_000;
 
     // @notice We assume that the current collateral ratio is >= 15,000 basis points.
     let mut susd: u64 = satoshis * exchange_rate / 15 * 10; //@review (mint) over-collateralization ratio (1.5)
 
-    let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap();
-    let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap();
-
-    let collateral_ratio = if btc_1 == 0 {
-        15000 // 150%
-    } else {
-        btc_1 * exchange_rate / susd_1 * 10000
-    };
+    let collateral_ratio = get_collateral_ratio(ssi).await?;
 
     // if the collateral ratio is less than 15000 basis points, then the user cannot withdraw susd amount, can withdraw an amount of susd so that the collateral ratio is at least 15000 basis points
     if collateral_ratio < 15000 {
+        let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
+        let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
+
         // calculate the amount of satoshis required so that the collateral ratio is at least 15000 basis points
-        let sats = (15000 * susd_1 / exchange_rate - btc_1).max(0);
+        let sats = (15/10 * susd_1 / exchange_rate - btc_1).max(0);
 
         let accepted_deposit = (satoshis - sats).max(0);
 
@@ -661,7 +671,7 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, /*memo: Memo,*/ 
             to,
             fee: None,
             created_at_time: None,
-            memo: None,//Some(memo),
+            memo: Some(memo),
             amount: Nat::from(satoshis),
         })
         .await
@@ -772,4 +782,22 @@ pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Ve
     
     let res = [block_index_susd.0.to_u64().expect("nat does not fit into u64")];
     Ok(res.to_vec())
+}
+
+pub async fn get_collateral_ratio(ssi: &str) -> Result<u64, UpdateBalanceError> {
+    let xr = get_exchange_rate().await??;
+    let exchange_rate = xr.rate / 1_000_000_000;
+
+    let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
+    let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
+
+    let collateral_ratio = if btc_1 == 0 {
+        15000 // 150%
+    } else if susd_1 == 0 {
+        0
+    } else {
+        btc_1 * exchange_rate / susd_1 * 10000
+    };
+
+    Ok(collateral_ratio)
 }
