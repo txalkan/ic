@@ -638,7 +638,7 @@ async fn _kyt_check_utxo(
 
 /// Registers the amount of locked BTC, the SU$D loan, and the SU$D balance.
 pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
-    let collateralized_account = get_collateralized_account(ssi).await?;
+    let collateralized_account = get_collateralized_account(ssi, false).await?;
     let exchange_rate = collateralized_account.exchange_rate;
 
     // @notice We assume that the current collateral ratio is >= 15,000 basis points.
@@ -786,9 +786,14 @@ pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Ve
     Ok(res.to_vec())
 }
 
-pub async fn get_collateralized_account(ssi: &str) -> Result<CollateralizedAccount, UpdateBalanceError> {
-    let xr = get_exchange_rate().await??;
-    let exchange_rate = xr.rate / 1_000_000_000;
+pub async fn get_collateralized_account(ssi: &str, dummy: bool) -> Result<CollateralizedAccount, UpdateBalanceError> {
+    let mut exchange_rate: u64;
+    if dummy {
+        exchange_rate = 52_361;
+    } else {
+        let xr = get_exchange_rate().await??;
+        exchange_rate = xr.rate / 1_000_000_000;
+    }
 
     let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
     let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
