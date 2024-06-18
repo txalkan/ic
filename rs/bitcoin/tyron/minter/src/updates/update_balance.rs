@@ -308,7 +308,7 @@ pub struct CollateralizedAccount {
 //     //     Err(err) => {
 //     //         log!(
 //     //             P0,
-//     //             "Failed to mint SU$D - Error: {:?}",
+//     //             "Failed to mint SUSD - Error: {:?}",
 //     //             // DisplayOutpoint(&utxo.outpoint),
 //     //             err
 //     //         );
@@ -418,8 +418,8 @@ pub async fn update_ssi_balance(
             }
         
             let token_name = match btc_network {
-                ic_management_canister_types::BitcoinNetwork::Mainnet => "SU$D",
-                _ => "tSU$D",
+                ic_management_canister_types::BitcoinNetwork::Mainnet => "SUSD",
+                _ => "tSUSD",
             };
 
             let kyt_fee = read_state(|s| s.kyt_fee);
@@ -541,7 +541,7 @@ pub async fn update_ssi_balance(
                     ))
                 })??;
         
-            // Syron SU$D Ledger
+            // Syron SUSD Ledger
             let susd_client = ICRC1Client {
                 runtime: CdkRuntime,
                 ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
@@ -559,7 +559,7 @@ pub async fn update_ssi_balance(
             .await
             .map_err(|(code, msg)| {
                 UpdateBalanceError::TemporarilyUnavailable(format!(
-                    "cannot grant su$d loan: {} (reject_code = {})",
+                    "cannot grant SUSD loan: {} (reject_code = {})",
                     msg, code
                 ))
             })??;
@@ -636,15 +636,15 @@ async fn _kyt_check_utxo(
     }
 }
 
-/// Registers the amount of locked BTC, the SU$D loan, and the SU$D balance.
+/// Registers the amount of locked BTC, the SUSD loan, and the SUSD balance.
 pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
     let collateralized_account = get_collateralized_account(ssi, false).await?;
     let exchange_rate = collateralized_account.exchange_rate;
 
     // @notice We assume that the current collateral ratio is >= 15,000 basis points.
-    let mut susd: u64 = satoshis * exchange_rate / 15 * 10; //@review (mint) over-collateralization ratio (1.5)
+    let mut susd: u64 = satoshis * exchange_rate / 15 * 10; //@review (mainnet) over-collateralization ratio (1.5)
 
-    // if the collateral ratio is less than 15000 basis points, then the user cannot withdraw susd amount, can withdraw an amount of susd so that the collateral ratio is at least 15000 basis points
+    // if the collateral ratio is less than 15000 basis points, then the user cannot withdraw SUSD amount, can withdraw an amount of SUSD so that the collateral ratio is at least 15000 basis points
     if collateralized_account.collateral_ratio < 15000 {
         // calculate the amount of satoshis required so that the collateral ratio is at least 15000 basis points
         let sats = ((1.5 * collateralized_account.susd_1 as f64 / exchange_rate as f64) as u64 - collateralized_account.btc_1).max(0);
@@ -661,12 +661,12 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
         }
     }
 
-    // debug_assert!(memo.0.len() <= crate::LEDGER_MEMO_SIZE as usize);
     let client = ICRC1Client {
         runtime: CdkRuntime,
         ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
     };
 
+    debug_assert!(memo.0.len() <= crate::LEDGER_MEMO_SIZE as usize);
     let block_index_btc1 = client
         .transfer(TransferArg {
             from_subaccount: None,
@@ -679,7 +679,7 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
         .await
         .map_err(|(code, msg)| {
             UpdateBalanceError::TemporarilyUnavailable(format!(
-                "cannot account ckbtc: {} (reject_code = {})",
+                "cannot account BTC: {} (reject_code = {})",
                 msg, code
             ))
         })??;
@@ -688,7 +688,7 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
     res.push(block_index_btc1.0.to_u64().expect("nat does not fit into u64"));
 
     if susd != 0 {
-        // @dev SU$D
+        // @dev SUSD
     
         let susd_client = ICRC1Client {
             runtime: CdkRuntime,
@@ -707,7 +707,7 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
             .await
             .map_err(|(code, msg)| {
                 UpdateBalanceError::TemporarilyUnavailable(format!(
-                    "cannot grant su$d loan: {} (reject_code = {})",
+                    "cannot grant SUSD loan: {} (reject_code = {})",
                     msg, code
                 ))
             })??;
@@ -724,14 +724,14 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
             .await
             .map_err(|(code, msg)| {
                 UpdateBalanceError::TemporarilyUnavailable(format!(
-                    "cannot update su$d balance: {} (reject_code = {})",
+                    "cannot update SUSD balance: {} (reject_code = {})",
                     msg, code
                 ))
             })??;
 
         // return Err(
         //     UpdateBalanceError::TemporarilyUnavailable(format!(
-        //         "satoshis: {}, xr: {}, su$d: {}",
+        //         "satoshis: {}, xr: {}, SUSD: {}",
         //         satoshis, xr.rate, susd
         //     ))
         // );
@@ -777,7 +777,7 @@ pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Ve
         UpdateBalanceError::GenericError{
             error_code: code as u64,
             error_message: format!(
-            "cannot update su$d balance: {}",
+            "cannot update SUSD balance: {}",
             msg)
         }
     })??;
@@ -787,21 +787,20 @@ pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Ve
 }
 
 pub async fn get_collateralized_account(ssi: &str, dummy: bool) -> Result<CollateralizedAccount, UpdateBalanceError> {
-    let mut exchange_rate: u64;
-    if dummy {
-        exchange_rate = 52_361;
-    } else {
-        let xr = get_exchange_rate().await??;
-        exchange_rate = xr.rate / 1_000_000_000;
-    }
-
+    let xr = get_exchange_rate().await??;
     let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
     let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
+    
+    let exchange_rate: u64 = if btc_1 != 0 {
+        (1.15 * susd_1 as f64 / btc_1 as f64) as u64
+    } else if dummy {
+        xr.rate / 1_000_000_000 / 137 * 100
+    } else {
+        xr.rate / 1_000_000_000
+    };
 
-    let collateral_ratio = if btc_1 == 0 {
+    let collateral_ratio = if btc_1 == 0 || susd_1 == 0 {
         15000 // 150%
-    } else if susd_1 == 0 {
-        0
     } else {
         ((btc_1 as f64 * exchange_rate as f64 / susd_1 as f64) * 10000.0) as u64
     };
