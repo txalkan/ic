@@ -484,6 +484,7 @@ pub async fn update_ssi_balance(
                         });
                     }
                     Err(err) => {
+                        return Err(err);
                         log!(
                             P0,
                             "Failed to mint for UTXO {}: {:?}",
