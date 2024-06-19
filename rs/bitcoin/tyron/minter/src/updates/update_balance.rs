@@ -667,14 +667,15 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
         ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
     };
 
-    debug_assert!(memo.0.len() <= crate::LEDGER_MEMO_SIZE as usize);
+    // debug_assert!(memo.0.len() <= crate::LEDGER_MEMO_SIZE as usize); @review (mainnet)
+    // Canister called `ic0.trap` with message: the memo field size of 39 bytes is above the allowed limit of 32 bytes (reject_code = 5)"
     let block_index_btc1 = client
         .transfer(TransferArg {
             from_subaccount: None,
             to,
             fee: None,
             created_at_time: None,
-            memo: Some(memo),
+            memo: None,//Some(memo),
             amount: Nat::from(satoshis),
         })
         .await
