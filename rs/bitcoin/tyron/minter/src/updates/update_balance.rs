@@ -793,10 +793,12 @@ pub async fn get_collateralized_account(ssi: &str, dummy: bool) -> Result<Collat
     let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
     let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
     
-    let exchange_rate: u64 = if btc_1 != 0 {
-        (1.15 * susd_1 as f64 / btc_1 as f64) as u64
-    } else if dummy {
-        xr.rate / 1_000_000_000 / 137 * 100
+    let exchange_rate: u64 = if dummy {
+        if btc_1 != 0 {
+            (1.15 * susd_1 as f64 / btc_1 as f64) as u64
+        } else {
+            xr.rate / 1_000_000_000 / 137 * 100
+        }
     } else {
         xr.rate / 1_000_000_000
     };
