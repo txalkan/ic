@@ -92,6 +92,20 @@ impl Reason {
             _ => Self::Other(reject_message),
         }
     }
+
+    fn to_string(&self) -> String {
+        match self {
+            Self::QueueIsFull => "the canister queue is full".to_string(),
+            Self::OutOfCycles => "the canister is out of cycles".to_string(),
+            Self::CanisterError(msg) => format!("canister error: {}", msg),
+            Self::Rejected(msg) => {
+                format!("the management canister rejected the call: {}", msg)
+            },
+            Self::Other(msg) => {
+                format!(" call rejected - reason: {}", msg)
+            }
+        }
+    }
 }
 
 async fn call<I, O>(method: &str, payment: u64, input: &I) -> Result<O, CallError>

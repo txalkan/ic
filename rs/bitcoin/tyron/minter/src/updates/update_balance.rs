@@ -1,5 +1,5 @@
 use crate::logs::{P0, P1};
-use crate::management::get_exchange_rate;
+use crate::management::{get_exchange_rate, Reason};
 use crate::memo::MintMemo;
 use crate::state::{mutate_state, read_state, UtxoCheckStatus};
 use crate::tasks::{schedule_now, TaskType};
@@ -90,6 +90,10 @@ pub enum UpdateBalanceError {
     GenericError {
         error_code: u64,
         error_message: String,
+    },
+    CallError {
+        method: String,
+        reason: String
     },
 }
 
