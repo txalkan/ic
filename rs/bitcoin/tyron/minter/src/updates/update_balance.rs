@@ -442,8 +442,8 @@ pub async fn update_ssi_balance(
                     continue;
                 }
         
-                // @review (inscription)
-                if utxo.value == 546 {
+                // @review (inscription) dust limit
+                if utxo.value < 600 {
                     mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
                     utxo_statuses.push(UtxoStatus::TransferInscription(utxo));
                     continue;
