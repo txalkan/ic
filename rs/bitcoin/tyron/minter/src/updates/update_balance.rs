@@ -143,7 +143,9 @@ pub struct CollateralizedAccount {
     exchange_rate: u64,
     pub collateral_ratio: u64,
     pub btc_1: u64,
-    pub susd_1: u64
+    pub susd_1: u64,
+    pub susd_2: u64,
+    pub susd_3: u64
 }
 
 /// Notifies the ckBTC minter to update the balance of the user subaccount.
@@ -796,6 +798,8 @@ pub async fn get_collateralized_account(ssi: &str, dummy: bool) -> Result<Collat
     let xr = get_exchange_rate().await??;
     let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
     let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
+    let susd_2 = balance_of(SyronLedger::SUSD, ssi, 2).await.unwrap_or(0);
+    let susd_3 = balance_of(SyronLedger::SUSD, ssi, 3).await.unwrap_or(0);
     
     let exchange_rate: u64 = if dummy {
         if btc_1 != 0 {
@@ -817,6 +821,8 @@ pub async fn get_collateralized_account(ssi: &str, dummy: bool) -> Result<Collat
         exchange_rate,
         collateral_ratio,
         btc_1,
-        susd_1
+        susd_1,
+        susd_2,
+        susd_3
     })
 }
