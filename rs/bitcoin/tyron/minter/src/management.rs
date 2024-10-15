@@ -296,7 +296,7 @@ pub async fn sign_with_ecdsa(
     derivation_path: DerivationPath,
     message_hash: [u8; 32],
 ) -> Result<Vec<u8>, CallError> {
-    const CYCLES_PER_SIGNATURE: u64 = 21_600_000_000;
+    const CYCLES_PER_SIGNATURE: u64 = 30_000_000_000;
 
     let reply: SignWithECDSAReply = call(
         "sign_with_ecdsa",
