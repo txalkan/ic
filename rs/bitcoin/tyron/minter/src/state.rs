@@ -329,13 +329,13 @@ pub struct CkBtcMinterState {
     /// The total amount of ckBTC burned.
     pub tokens_burned: u64,
 
-    /// The CanisterId of the BTC Syron Ledger.
+    /// The CanisterId of the Syron Ledger for BTC.
     pub ledger_id: CanisterId,
 
-    /// The CanisterId of the SU$D Syron Ledger.
+    /// The CanisterId of the Syron Ledger for USD.
     pub susd_id: CanisterId,
 
-    /// The CanisterId of the Exchange Rate CanisterError
+    /// The CanisterId of the Exchange Rate CanisterError.
     pub xrc_id: CanisterId,
 
     /// The principal of the KYT canister.

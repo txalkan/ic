@@ -15,7 +15,7 @@ use ic_ckbtc_minter_tyron::state::{
     ReimbursementReason::{CallFailed, TaintedDestination},
     RetrieveBtcStatus, RetrieveBtcStatusV2,
 };
-use ic_ckbtc_minter_tyron::updates::get_btc_address::GetBtcAddressArgs;
+use ic_ckbtc_minter_tyron::updates::get_btc_address::GetBoxAddressArgs;
 use ic_ckbtc_minter_tyron::updates::retrieve_btc::{
     RetrieveBtcArgs, RetrieveBtcError, RetrieveBtcOk, RetrieveBtcWithApprovalArgs,
     RetrieveBtcWithApprovalError,
@@ -550,7 +550,7 @@ fn test_illegal_caller() {
 pub fn get_btc_address(
     env: &StateMachine,
     minter_id: CanisterId,
-    arg: &GetBtcAddressArgs,
+    arg: &GetBoxAddressArgs,
 ) -> String {
     Decode!(
         &env.execute_ingress_as(
@@ -588,7 +588,7 @@ fn test_minter() {
     let btc_address_1 = get_btc_address(
         &env,
         minter_id,
-        &GetBtcAddressArgs {
+        &GetBoxAddressArgs {
             owner: None,
             subaccount: None,
             ssi: SSI.to_string(),
@@ -598,7 +598,7 @@ fn test_minter() {
     let btc_address_2 = get_btc_address(
         &env,
         minter_id,
-        &GetBtcAddressArgs {
+        &GetBoxAddressArgs {
             owner: None,
             subaccount: Some([1; 32]),
             ssi: SSI.to_string(),
@@ -653,7 +653,7 @@ impl Setup {
             ledger_id,
             ledger_wasm(),
             Encode!(&LedgerArgument::Init(
-                LedgerInitArgsBuilder::with_symbol_and_name("SU$D", "SU$D")
+                LedgerInitArgsBuilder::with_symbol_and_name("SYRON", "SYRON")
                     .with_minting_account(minter_id.get().0)
                     .with_transfer_fee(TRANSFER_FEE)
                     .with_max_memo_length(LEDGER_MEMO_SIZE)
@@ -767,7 +767,7 @@ impl Setup {
                         self.caller,
                         self.minter_id,
                         "get_btc_address",
-                        Encode!(&GetBtcAddressArgs {
+                        Encode!(&GetBoxAddressArgs {
                             owner: Some(account.owner),
                             subaccount: account.subaccount,
                         })

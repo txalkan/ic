@@ -464,7 +464,7 @@ pub async fn balance_of(ledger: SyronLedger, ssi: &str, nonce: u64) -> Result<u6
         }
     };
 
-    // @review (burn) Users must send SU$D to their safety deposit boxes to withdraw/redeem BTC.
+    // @review (burn) Users must send SYRON to their safety deposit boxes to withdraw/redeem BTC.
     
     let subaccount = compute_subaccount(nonce, ssi);
     let result = client

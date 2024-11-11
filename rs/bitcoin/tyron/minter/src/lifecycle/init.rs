@@ -59,10 +59,10 @@ pub struct InitArgs {
     /// Minimum amount of bitcoin that can be retrieved
     pub retrieve_btc_min_amount: u64,
 
-    /// The CanisterId of the BTC Syron Ledger
+    /// The CanisterId of the Syron Ledger for BTC
     pub ledger_id: CanisterId,
 
-    /// The CanisterId of the SU$D Syron Ledger
+    /// The CanisterId of the Syron Ledger for USD
     pub susd_id: CanisterId,
 
     /// The CanisterId of the Exchange Rate Canister
