@@ -833,3 +833,40 @@ pub async fn get_collateralized_account(ssi: &str, dummy: bool) -> Result<Collat
         susd_3
     })
 }
+
+pub async fn syron_payment(ssi: &str, recipient: &str, susd: u64) -> Result<Vec<u64>, UpdateBalanceError> {
+    let susd_client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
+    };
+
+    let from_subaccount = Some(compute_subaccount(2, ssi));
+    let to_subaccount = compute_subaccount(2, recipient);
+    
+    let to_account = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(to_subaccount)
+    };
+
+    let block_index_susd = susd_client
+    .transfer(TransferArg {
+        from_subaccount,
+        to: to_account,
+        fee: None,
+        created_at_time: None,
+        memo: None,
+        amount: Nat::from(susd),
+    })
+    .await
+    .map_err(|(code, msg)| {
+        UpdateBalanceError::GenericError{
+            error_code: code as u64,
+            error_message: format!(
+            "Could not update SYRON balance: {}",
+            msg)
+        }
+    })??;
+    
+    let res = [block_index_susd.0.to_u64().expect("Nat does not fit into u64")];
+    Ok(res.to_vec())
+}
