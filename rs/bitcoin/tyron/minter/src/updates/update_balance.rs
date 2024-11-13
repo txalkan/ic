@@ -577,6 +577,13 @@ pub async fn update_ssi_balance(
                 error_code: ErrorCode::UnsupportedOperation as u64,
                 error_message: "Invalid operation".to_string()
             });
+        },
+        SyronOperation::Payment => {
+            // invalid operation, throw error
+            return Err(UpdateBalanceError::GenericError {  
+                error_code: ErrorCode::UnsupportedOperation as u64,
+                error_message: "Invalid operation".to_string()
+            });
         }
     }
     schedule_now(TaskType::ProcessLogic);
