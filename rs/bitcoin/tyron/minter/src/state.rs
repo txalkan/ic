@@ -335,8 +335,11 @@ pub struct CkBtcMinterState {
     /// The CanisterId of the Syron Ledger for USD.
     pub susd_id: CanisterId,
 
-    /// The CanisterId of the Exchange Rate CanisterError.
+    /// The CanisterId of the Exchange Rate Canister.
     pub xrc_id: CanisterId,
+
+    /// The CanisterId of the Sign In With Bitcoin canister. @update state
+    pub siwb_id: CanisterId,
 
     /// The principal of the KYT canister.
     pub kyt_principal: Option<CanisterId>,
@@ -430,6 +433,7 @@ impl CkBtcMinterState {
             ledger_id,
             susd_id,
             xrc_id,
+            siwb_id,
             max_time_in_queue_nanos,
             min_confirmations,
             mode,
@@ -443,6 +447,7 @@ impl CkBtcMinterState {
         self.ledger_id = ledger_id;
         self.susd_id = susd_id;
         self.xrc_id = xrc_id;
+        self.siwb_id = siwb_id;
         self.max_time_in_queue_nanos = max_time_in_queue_nanos;
         self.mode = mode;
         self.kyt_principal = kyt_principal;
@@ -1246,6 +1251,7 @@ impl From<InitArgs> for CkBtcMinterState {
             ledger_id: args.ledger_id,
             susd_id: args.susd_id,
             xrc_id: args.xrc_id,
+            siwb_id: args.siwb_id,
             kyt_principal: args.kyt_principal,
             available_utxos: Default::default(),
             outpoint_account: Default::default(),
