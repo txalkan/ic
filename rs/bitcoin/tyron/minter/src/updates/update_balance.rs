@@ -1,5 +1,5 @@
 use crate::logs::{P0, P1};
-use crate::management::{get_exchange_rate, Reason};
+use crate::management::{get_exchange_rate, get_siwb_principal};
 use crate::memo::MintMemo;
 use crate::state::{mutate_state, read_state, UtxoCheckStatus};
 use crate::tasks::{schedule_now, TaskType};
@@ -835,6 +835,9 @@ pub async fn get_collateralized_account(ssi: &str, dummy: bool) -> Result<Collat
 }
 
 pub async fn syron_payment(ssi: &str, recipient: &str, susd: u64) -> Result<Vec<u64>, UpdateBalanceError> {
+    let principal = get_siwb_principal(ssi).await?;
+    ic_cdk::println!("SIWB Principal: {:?}", principal);
+                        
     let susd_client = ICRC1Client {
         runtime: CdkRuntime,
         ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),

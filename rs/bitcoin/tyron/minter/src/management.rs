@@ -19,6 +19,7 @@ use ic_management_canister_types::{
 use serde::de::DeserializeOwned;
 use std::fmt;
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateResult, ExchangeRateError};
+use serde_bytes::ByteBuf;
 
 /// Represents an error from a management canister call, such as
 /// `sign_with_ecdsa` or `bitcoin_send_transaction`.
@@ -423,6 +424,61 @@ pub(crate) async fn get_exchange_rate() -> Result<GetExchangeRateResult, CallErr
 
     match res {
         Ok((output,)) => Ok(output),
+        Err((code, msg)) => Err(CallError {
+            method: method.to_string(),
+            reason: Reason::from_reject(code, msg),
+        }),
+    }
+}
+
+pub(crate) async fn get_siwb_principal(ssi: &str) -> Result<Principal, CallError> {
+    let caller = ic_cdk::caller();
+
+    let method = "get_principal";
+
+    let res: Result<(Result<ByteBuf, String>,), _> = ic_cdk::api::call::call(
+        read_state(|s| s.siwb_id.get().into()),
+        method,
+        (ssi,),
+    )
+    .await;
+
+    match res {
+        Ok((output,)) => {
+            match output {
+                Ok(byte_buf) => {
+                    match Principal::try_from_slice(&byte_buf) {
+                        Ok(principal) => {
+                            // @dev the principal must be equal to the caller or throw an error
+                            if principal == caller {
+                                Ok(principal)
+                            } else {
+                                Err(CallError {
+                                    method: method.to_string(),
+                                    reason: Reason::Other("Invalid caller".to_string()),
+                                })
+                            }
+                        }
+                        Err(e) => {
+                            let err = format!("Failed to decode principal with error: {:?}", e); 
+                            ic_cdk::println!("{}", &err);
+                            Err(CallError {
+                                method: method.to_string(),
+                                reason: Reason::Other(err),
+                            })
+                        }
+                    }
+                }
+                Err(e) => {
+                    let err = format!("The call returned an error: {:?}", e);
+                    ic_cdk::println!("{}", &err);
+                    Err(CallError {
+                        method: method.to_string(),
+                        reason: Reason::Other(err),
+                    })                    
+                }
+            }
+        },
         Err((code, msg)) => Err(CallError {
             method: method.to_string(),
             reason: Reason::from_reject(code, msg),
