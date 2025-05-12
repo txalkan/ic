@@ -1,9 +1,9 @@
 [package]
 name = "ic-ckbtc-minter-tyron"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 authors = ["Xalkan Duarte <xalkan@tyrondao.org>"]
-description = "Tyron is a decentralized finance project focused on developing Syron USD (SYRON), an overcollateralized stablecoin pegged to the U.S. dollar and backed by BTC. Powered by the Internet Computer, Tyron aims to provide users with seamless access to USD liquidity while leveraging the security and decentralization of Bitcoin."
+description = "Tyron is a decentralized finance project focused on developing Syron SUSD, an overcollateralized stablecoin pegged to the U.S. dollar and backed by BTC. Powered by the Internet Computer, Tyron aims to provide users with seamless access to USD liquidity while leveraging the security and decentralization of Bitcoin."
 documentation = "https://docs.tyrondao.org"
 
 [[bin]]

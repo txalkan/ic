@@ -5,13 +5,13 @@
 //! code should use those functions instead of touching `__STATE` directly.
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque}, default,
 };
 
 pub mod audit;
 pub mod eventlog;
 
-use crate::lifecycle::init::InitArgs;
+use crate::{lifecycle::init::InitArgs};
 use crate::lifecycle::upgrade::UpgradeArgs;
 use crate::logs::P0;
 use crate::{address::BitcoinAddress, ECDSAPublicKey};
@@ -268,6 +268,12 @@ pub struct Overdraft(pub u64);
 pub struct CkBtcMinterState {
     /// The bitcoin network that the minter will connect to
     pub btc_network: Network,
+
+    /// The bitcoin address of minter & treasury
+    pub dao_addr: Vec<BitcoinAddress>,
+
+    /// Safety Deposit Boxes per SSI Bitcoin address @review update to BitcoinAddress
+    pub sdbs: BTreeMap<String, String>,
 
     /// The name of the [EcdsaKeyId]. Use "dfx_test_key" for local replica and "test_key_1" for
     /// a testing key for testnet and mainnet
@@ -1227,6 +1233,8 @@ impl From<InitArgs> for CkBtcMinterState {
     fn from(args: InitArgs) -> Self {
         Self {
             btc_network: args.btc_network.into(),
+            dao_addr: vec![],
+            sdbs: Default::default(),
             ecdsa_key_name: args.ecdsa_key_name,
             ecdsa_public_key: None,
             min_confirmations: args

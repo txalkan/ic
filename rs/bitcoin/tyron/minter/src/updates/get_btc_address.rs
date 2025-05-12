@@ -1,7 +1,5 @@
 use crate::{
-    logs::P1,
-    state::{mutate_state, read_state, CkBtcMinterState},
-    ECDSAPublicKey,
+    address::BitcoinAddress, logs::P1, state::{mutate_state, read_state, CkBtcMinterState}, ECDSAPublicKey
 };
 use candid::{CandidType, Deserialize, Principal};
 use ic_base_types::PrincipalId;
@@ -74,25 +72,43 @@ pub async fn get_btc_address(args: GetBtcAddressArgs) -> String {
 }
 
 pub async fn get_box_address(args: GetBoxAddressArgs) -> String {
-    init_ecdsa_public_key().await;
-
     let minter = ic_cdk::id();
-    let ssi_box_subaccount: Subaccount = compute_subaccount(1, &args.ssi);
+
+    // @dev Validate that the SSI is a valid Bitcoin address
+    let network = read_state(|s| (s.btc_network));
+    let ssi = match BitcoinAddress::parse(&args.ssi, network) {
+        Ok(ssi) => {
+            let addr = ssi.display(network);
+            ic_cdk::println!("Given SSI: {}; Parsed Bitcoin Address: {}", &args.ssi, addr);
+            addr
+        },
+        Err(e) => {
+            ic_cdk::trap(&format!("Invalid SSI: {e}"))
+        }       
+    };
+    
+    let ssi_box_subaccount: Subaccount = compute_subaccount(1, &ssi);
 
     let ssi_box_account =  &Account {
         owner: minter,
         subaccount: Some(ssi_box_subaccount)
     };
 
-    ic_cdk::println!("Account: {}", ssi_box_account);
+    ic_cdk::println!("Getting Box address for Account ({}) with nonce ({})...", ssi_box_account, "1");
 
-    read_state(|s| {
+    let sdb = read_state(|s| {
         ssi_account_to_p2wpkh_address_from_state(
             s,
             ssi_box_account,
-            &args.ssi
+            &ssi
         )
-    })
+    });
+
+    //@sdbs
+    // mutate_state(|s| {
+    //     s.ecdsa_public_key = Some(ecdsa_public_key.clone());
+    // });
+    sdb
 }
 
 /// Initializes the Minter ECDSA public key. This function must be called

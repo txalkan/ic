@@ -1,3 +1,4 @@
+use crate::address::BitcoinAddress;
 use crate::logs::{P0, P1};
 use crate::management::{get_exchange_rate, get_siwb_principal};
 use crate::memo::MintMemo;
@@ -14,7 +15,7 @@ use icrc_ledger_types::icrc1::transfer::Memo;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use num_traits::ToPrimitive;
 use serde::Serialize;
-use super::get_btc_address::{init_ecdsa_public_key, GetBoxAddressArgs, SyronOperation};
+use super::get_btc_address::{GetBoxAddressArgs, SyronOperation};
 use super::get_withdrawal_account::compute_subaccount;
 use super::retrieve_btc::{balance_of, SyronLedger};
 use crate::{
@@ -339,7 +340,7 @@ pub async fn update_ssi_balance(
     state::read_state(|s| s.mode.is_deposit_available_for(&minter))
         .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
 
-    init_ecdsa_public_key().await;
+    // init_ecdsa_public_key().await;
     let _guard = balance_update_guard(minter/*args.owner.unwrap_or(caller)*/)?;
 
     let ssi_box_subaccount = compute_subaccount(1, &args.ssi);
@@ -530,7 +531,6 @@ pub async fn update_ssi_balance(
                 runtime: CdkRuntime,
                 ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
             };
-        
             sbtc_client
                 .transfer(TransferArg {
                     from_subaccount: Some(ssi_box_subaccount),
@@ -652,7 +652,7 @@ async fn _kyt_check_utxo(
 
 /// Registers the amount of locked BTC, the SUSD loan, and the SUSD balance.
 pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
-    let collateralized_account = get_collateralized_account(ssi, false).await?;
+    let collateralized_account = get_collateralized_account(ssi).await?;
     let exchange_rate = collateralized_account.exchange_rate;
 
     // @notice We assume that the current collateral ratio is >= 15,000 basis points.
@@ -764,20 +764,27 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
     Ok(res)
 }
 
-pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Vec<u64>, UpdateBalanceError> {
+pub async fn syron_update(ssi: &str, from: u64, to: Option<u64>, susd: u64) -> Result<Vec<u64>, UpdateBalanceError> {
+    let from_subaccount = Some(compute_subaccount(from, ssi));
+    
+    let to_account: Account = match to {
+        Some(to) => {
+            let to_subaccount = compute_subaccount(to, ssi);
+            Account {
+                owner: ic_cdk::id(),
+                subaccount: Some(to_subaccount)
+            }
+        },
+        None => Account {
+            owner: ic_cdk::id(),
+            subaccount: None
+        }
+    };
+
     let susd_client = ICRC1Client {
         runtime: CdkRuntime,
         ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
     };
-
-    let from_subaccount = Some(compute_subaccount(from, ssi));
-    let to_subaccount = compute_subaccount(to, ssi);
-    
-    let to_account = Account {
-        owner: ic_cdk::id(),
-        subaccount: Some(to_subaccount)
-    };
-
     let block_index_susd = susd_client
     .transfer(TransferArg {
         from_subaccount,
@@ -801,22 +808,68 @@ pub async fn syron_update(ssi: &str, from: u64, to: u64, susd: u64) -> Result<Ve
     Ok(res.to_vec())
 }
 
-pub async fn get_collateralized_account(ssi: &str, dummy: bool) -> Result<CollateralizedAccount, UpdateBalanceError> {
+pub async fn btc_bal_update(ssi: &str, from: u64, to: Option<u64>, amt: u64) -> Result<Vec<u64>, UpdateBalanceError> {
+    let from_subaccount = Some(compute_subaccount(from, ssi));
+    
+    let to_account: Account = match to {
+        Some(to) => {
+            let to_subaccount = compute_subaccount(to, ssi);
+            Account {
+                owner: ic_cdk::id(),
+                subaccount: Some(to_subaccount)
+            }
+        },
+        None => Account {
+            owner: ic_cdk::id(),
+            subaccount: None
+        }
+    };
+    
+    let sbtc_client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
+    };
+    let block_index_btc = sbtc_client
+    .transfer(TransferArg {
+        from_subaccount,
+        to: to_account,
+        fee: None,
+        created_at_time: None,
+        memo: None,
+        amount: Nat::from(amt),
+    })
+    .await
+    .map_err(|(code, msg)| {
+        UpdateBalanceError::GenericError{
+            error_code: code as u64,
+            error_message: format!(
+            "cannot update SBTC balance: {}",
+            msg)
+        }
+    })??;
+    
+    let res = [block_index_btc.0.to_u64().expect("nat does not fit into u64")];
+    Ok(res.to_vec())
+}
+
+pub async fn get_collateralized_account(ssi: &str) -> Result<CollateralizedAccount, UpdateBalanceError> {
     let xr = get_exchange_rate().await??;
     let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
     let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
     let susd_2 = balance_of(SyronLedger::SUSD, ssi, 2).await.unwrap_or(0);
     let susd_3 = balance_of(SyronLedger::SUSD, ssi, 3).await.unwrap_or(0);
     
-    let exchange_rate: u64 = if dummy {
-        if btc_1 != 0 {
-            (1.15 * susd_1 as f64 / btc_1 as f64) as u64
-        } else {
-            xr.rate / 1_000_000_000 / 137 * 100
-        }
-    } else {
-        xr.rate / 1_000_000_000
-    };
+    let exchange_rate: u64 = xr.rate / 1_000_000_000;
+    
+    // if dummy {
+    //     if btc_1 != 0 {
+    //         (1.15 * susd_1 as f64 / btc_1 as f64) as u64
+    //     } else {
+    //         xr.rate / 1_000_000_000 / 137 * 100
+    //     }
+    // } else {
+    //     xr.rate / 1_000_000_000
+    // };
 
     let collateral_ratio = if btc_1 == 0 || susd_1 == 0 {
         15000 // 150%
@@ -834,15 +887,86 @@ pub async fn get_collateralized_account(ssi: &str, dummy: bool) -> Result<Collat
     })
 }
 
-pub async fn syron_payment(ssi: &str, recipient: &str, susd: u64) -> Result<Vec<u64>, UpdateBalanceError> {
-    let principal = get_siwb_principal(ssi).await?;
-    ic_cdk::println!("SIWB Principal: {:?}", principal);
-                        
-    let susd_client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
-    };
+pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, susd: u64, btc: Option<u64>) -> Result<Vec<u64>, UpdateBalanceError> {
+    // SUSD amount cannot be lower than 20 cents @governance
+    if susd < 20_000_000 {
+        return Err(UpdateBalanceError::GenericError{
+            error_code: 6001,
+            error_message: format!("SUSD amount ({}) is below the minimum", susd),
+        });
+    }
 
+    let network = read_state(|s| (s.btc_network));
+    let ssi = &sender.display(network);
+    let recipient = &receiver.display(network);
+    
+    let principal = get_siwb_principal(ssi).await?;
+    ic_cdk::println!("SIWB Internet Identity: {:?}", principal);
+    
+    let mut res = vec![];
+
+    match btc {
+        Some(btc) => {
+            // @dev BTC amount cannot be lower than 200 sats @governance
+            if btc < 200 {
+                return Err(UpdateBalanceError::GenericError{
+                    error_code: 7001,
+                    error_message: format!("BTC amount ({}) is below the minimum", btc),
+                });
+            }
+
+            let xr = get_exchange_rate().await??;
+            let exchange_rate: u64 = xr.rate / 1_000_000_000;
+            let bitcoin_amount = (susd as f64 / exchange_rate as f64) as u64;
+            
+            // "bitcoin_amount" must be at least the minimum BTC amount requested by the user ("btc")
+            if bitcoin_amount < btc {
+                return Err(UpdateBalanceError::GenericError{
+                    error_code: 7002,
+                    error_message: format!(
+                        "Insufficient BTC amount. Computed amount: {} sats, Minimum Required: {} sats, Exchange Rate: {}",
+                        bitcoin_amount, btc, exchange_rate
+                    )
+                });
+            }
+            
+            // @dev Use subaccount 0 in SBTC ledger for swap credit
+            let swap_subaccount = compute_subaccount(0, ssi);
+            let swap_account = Account {
+                owner: ic_cdk::id(),
+                subaccount: Some(swap_subaccount)
+            };
+
+            // Syron BTC Ledger
+            let sbtc_client = ICRC1Client {
+                runtime: CdkRuntime,
+                ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
+            };
+            let block_index_btc = sbtc_client
+            .transfer(TransferArg {
+                from_subaccount: None,
+                to: swap_account,
+                fee: None,
+                created_at_time: None,
+                memo: None,
+                amount: Nat::from(bitcoin_amount),
+            })
+            .await
+            .map_err(|(code, msg)| {
+                UpdateBalanceError::GenericError{
+                    error_code: code as u64,
+                    error_message: format!(
+                    "Could not update BTC swap credit: {}",
+                    msg)
+                }
+            })??;
+        
+            res.push(block_index_btc.0.to_u64().expect("Nat does not fit into u64"));
+            ic_cdk::println!("The user has been credited {:?} satoshis", bitcoin_amount);
+        },
+        None => {}  
+    } 
+    
     let from_subaccount = Some(compute_subaccount(2, ssi));
     let to_subaccount = compute_subaccount(2, recipient);
     
@@ -851,6 +975,10 @@ pub async fn syron_payment(ssi: &str, recipient: &str, susd: u64) -> Result<Vec<
         subaccount: Some(to_subaccount)
     };
 
+    let susd_client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
+    };
     let block_index_susd = susd_client
     .transfer(TransferArg {
         from_subaccount,
@@ -865,11 +993,13 @@ pub async fn syron_payment(ssi: &str, recipient: &str, susd: u64) -> Result<Vec<
         UpdateBalanceError::GenericError{
             error_code: code as u64,
             error_message: format!(
-            "Could not update SYRON balance: {}",
+            "Could not update Syron SUSD transfer balance: {}",
             msg)
         }
     })??;
     
-    let res = [block_index_susd.0.to_u64().expect("Nat does not fit into u64")];
-    Ok(res.to_vec())
+    res.push(block_index_susd.0.to_u64().expect("Nat does not fit into u64"));
+    ic_cdk::println!("The user has sent {:?} susd-sats", susd);
+    
+    Ok(res)
 }

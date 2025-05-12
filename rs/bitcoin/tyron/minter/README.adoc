@@ -1,14 +1,14 @@
 = The Syron Minter Canister +
 
 
-The Syron Minter canister converts BTC to SYRON and back.
+The Syron Minter canister converts BTC to Syron SUSD and back.
 
-Syron USD (SYRON) is an overcollateralized stablecoin pegged to the U.S. dollar. By holding BTC in a Self-Sovereign Identity (SSI) Vault, one can achieve greater financial sovereignty using Bitcoin as a decentralized and permissionless bank.
+Syron SUSD is an overcollateralized stablecoin pegged to the U.S. dollar. By holding BTC in a Self-Sovereign Identity (SSI) Safety Deposit Box, one can achieve greater financial sovereignty using Bitcoin as a decentralized and permissionless bank.
 
-This ICP implementation of Syron works with the link:../../../rosetta-api/icrc1/README.md[Syron Ledger Canister], managing SYRON token transfers, and the link:../../canister/README.adoc[Bitcoin Canister], interfacing with the Bitcoin network. The Syron Minter canister serves as a https://github.com/dfinity/ICRC-1/blob/8c526e1dae38622eb0940643996e8187d2063513/standards/ICRC-1/README.md#minting-account-[minter] for the Syron Ledger canister: it can mint and burn SYRON dollars.
+This ICP implementation of Syron works with the link:../../../rosetta-api/icrc1/README.md[Syron Ledger Canister], managing SUSD token transfers, and the link:../../canister/README.adoc[Bitcoin Canister], interfacing with the Bitcoin network. The Syron Minter canister serves as a https://github.com/dfinity/ICRC-1/blob/8c526e1dae38622eb0940643996e8187d2063513/standards/ICRC-1/README.md#minting-account-[minter] for the Syron Ledger canister: it can mint and burn Syron dollars.
 
 == Interact with the Syron Canister
-=== Bitcoin (BTC) to Syron USD (SYRON)
+=== Bitcoin (BTC) to Syron (SUSD)
 
 image::public/images/syron_get_susd.png[]
 
