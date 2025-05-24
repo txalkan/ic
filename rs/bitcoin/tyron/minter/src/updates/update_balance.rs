@@ -1,6 +1,6 @@
 use crate::address::BitcoinAddress;
 use crate::logs::{P0, P1};
-use crate::management::{get_exchange_rate, get_siwb_principal};
+use crate::management::{fetch_btc_exchange_rate, get_siwb_principal};
 use crate::memo::MintMemo;
 use crate::state::{mutate_state, read_state, UtxoCheckStatus};
 use crate::tasks::{schedule_now, TaskType};
@@ -853,7 +853,7 @@ pub async fn btc_bal_update(ssi: &str, from: u64, to: Option<u64>, amt: u64) -> 
 }
 
 pub async fn get_collateralized_account(ssi: &str) -> Result<CollateralizedAccount, UpdateBalanceError> {
-    let xr = get_exchange_rate().await??;
+    let xr = fetch_btc_exchange_rate("USD".to_string()).await??;
     let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
     let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
     let susd_2 = balance_of(SyronLedger::SUSD, ssi, 2).await.unwrap_or(0);
@@ -915,7 +915,7 @@ pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, sus
                 });
             }
 
-            let xr = get_exchange_rate().await??;
+            let xr = fetch_btc_exchange_rate("USD".to_string()).await??;
             let exchange_rate: u64 = xr.rate / 1_000_000_000;
             let bitcoin_amount = (susd as f64 / exchange_rate as f64) as u64;
             

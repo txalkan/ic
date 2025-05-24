@@ -366,19 +366,19 @@ pub async fn fetch_withdrawal_alerts(
     Ok(res)
 }
 
-pub(crate) async fn get_exchange_rate() -> Result<GetExchangeRateResult, CallError> {
+pub async fn fetch_btc_exchange_rate(symbol: String) -> Result<GetExchangeRateResult, CallError> {
     let btc = Asset {
         symbol: "BTC".to_string(),
         class: AssetClass::Cryptocurrency,
     };
-    let usd = Asset {
-        symbol: "USD".to_string(),
+    let quote_asset = Asset {
+        symbol,
         class: AssetClass::FiatCurrency,
     };
 
     let request = GetExchangeRateRequest {
         base_asset: btc,
-        quote_asset: usd,
+        quote_asset,
         timestamp: None,
     };
 
