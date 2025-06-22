@@ -1,17 +1,22 @@
-use super::{get_btc_address::init_ecdsa_public_key, get_withdrawal_account::compute_subaccount};
+use super::{
+    // get_btc_address::init_ecdsa_public_key, 
+    get_withdrawal_account::compute_subaccount};
 use crate::logs::P0;
 use crate::logs::P1;
 use crate::management::fetch_withdrawal_alerts;
-use crate::memo::{BurnMemo, Status};
-use crate::state::ReimbursementReason;
+//use crate::memo::{BurnMemo, Status};
+// use crate::state::ReimbursementReason;
 use crate::tasks::{schedule_now, TaskType};
 use crate::{
-    address::{account_to_bitcoin_address, BitcoinAddress, ParseAddressError},
+    address::{
+        // account_to_bitcoin_address, 
+        BitcoinAddress, ParseAddressError},
     guard::{retrieve_btc_guard, GuardError},
     state::{self, mutate_state, read_state, RetrieveBtcRequest},
+    updates::update_balance
 };
 use candid::{CandidType, Deserialize, Nat, Principal};
-use ic_base_types::PrincipalId;
+// use ic_base_types::PrincipalId;
 use ic_canister_log::log;
 use ic_ckbtc_kyt::Error as KytError;
 use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
@@ -31,10 +36,8 @@ pub struct RetrieveBtcArgs {
     // amount to retrieve in satoshi
     pub amount: u64,
 
-    // address where to send bitcoins
-    // pub address: String,
-
-    pub ssi: String
+    // address where to send bitcoin transactions - including Syron stablecoins
+    pub address: String
 }
 
 /// The arguments of the [retrieve_btc_with_approval] endpoint.
@@ -47,9 +50,7 @@ pub struct RetrieveBtcWithApprovalArgs {
     pub address: String,
 
     // The subaccount to burn ckBTC from.
-    pub from_subaccount: Option<Subaccount>,
-
-    pub ssi: String
+    pub from_subaccount: Option<Subaccount>
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -62,11 +63,12 @@ pub enum ErrorCode {
     // The retrieval address didn't pass the KYT check.
     TaintedAddress = 1,
     KytCallFailed = 2,
+    ReservedMinterNonce = 3
 }
 
 pub enum SyronLedger {
     BTC,
-    SUSD,
+    SYRON,
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -156,62 +158,68 @@ impl From<ParseAddressError> for RetrieveBtcWithApprovalError {
     }
 }
 
-pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, RetrieveBtcError> {
-    let minter = ic_cdk::id();
-    let ssi = &args.ssi;
-
-    // @dev Check if mode is available
-    state::read_state(|s| s.mode.is_withdrawal_available_for(&minter))
-        .map_err(RetrieveBtcError::TemporarilyUnavailable)?;
-
-    // @dev Check if SSI is in the blocklist
-    if crate::blocklist::BTC_ADDRESS_BLOCKLIST
-        .binary_search(&ssi.trim())
-        .is_ok()
-    {
-        ic_cdk::trap("attempted to retrieve BTC to a blocked address");
+// for runes: minter_nonce = 2 & ssi_nonce = 4
+pub async fn retrieve_btc(args: RetrieveBtcArgs, minter_nonce: u64, ssi_nonce: u64) -> Result<RetrieveBtcOk, RetrieveBtcError> {
+    // @dev throw error if the minter nonce is equal to 1 (reserved for the treasury)
+    if minter_nonce == 1 {
+        return Err(RetrieveBtcError::GenericError {
+            error_message: "minter nonce 1 is reserved for the treasury".to_string(),
+            error_code: 3,
+        });
     }
 
-    // @dev Get Safe-Deposit Box address
-    let ecdsa_public_key = init_ecdsa_public_key().await;
-    
-    let ssi_subaccount = compute_subaccount(1, ssi);
-    
-    let box_address = account_to_bitcoin_address(
-        &ecdsa_public_key,
-        &Account {
-            owner: minter,
-            subaccount: Some(ssi_subaccount),
-        },
-        ssi
-    );
-    // @dev Validate box against SSI
-    if ssi.to_string() == box_address.display(state::read_state(|s| s.btc_network)) {
-        ic_cdk::trap("illegal retrieve_btc target");
-    }
-
-    // @dev Get guard for the minter
-    let _guard = retrieve_btc_guard(minter)?;
-    
-    // @dev Get state
-    let (min_retrieve_amount, btc_network, kyt_fee) =
-        read_state(|s| (s.retrieve_btc_min_amount, s.btc_network, s.kyt_fee));
+    // @dev get state & check
+    // get network & parse the address
+    let (min_retrieve_amount, btc_network, kyt_fee, dao_addr) =
+        read_state(|s| (s.retrieve_btc_min_amount, s.btc_network, s.kyt_fee, s.dao_addr.clone()));
 
     let min_amount = max(min_retrieve_amount, kyt_fee);
     if args.amount < min_amount {
         return Err(RetrieveBtcError::AmountTooLow(min_amount));
     }
 
+    // @dev get ssi account
+    let ssi = &args.address;
     let parsed_address = BitcoinAddress::parse(ssi, btc_network)?;
     
-    if read_state(|s| s.count_incomplete_retrieve_btc_requests() >= MAX_CONCURRENT_PENDING_REQUESTS)
+    let ssi_subaccount = compute_subaccount(0, ssi);
+    let balance_subaccount = compute_subaccount(2, ssi);
+    
+    let ssi_account = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(ssi_subaccount),
+    };
+
+    // @dev Check if mode is available for ssi account
+    // @review (alpha) check allow list
+    state::read_state(|s| s.mode.is_withdrawal_available_for(&ssi_account))
+        .map_err(RetrieveBtcError::TemporarilyUnavailable)?;
+
+    // @dev check if ssi address is in the blocklist
+    if crate::blocklist::BTC_ADDRESS_BLOCKLIST
+        .binary_search(&ssi.trim())
+        .is_ok()
     {
+        ic_cdk::trap("attempted to retrieve to a blocked address");
+    }
+
+    // @dev get minter address
+    let minter_address = &dao_addr[minter_nonce as usize];
+
+    if args.address == minter_address.display(btc_network) {
+        ic_cdk::trap("illegal retrieve_btc target");
+    }
+
+    if read_state(|s| s.count_incomplete_retrieve_btc_requests() >= MAX_CONCURRENT_PENDING_REQUESTS){
         return Err(RetrieveBtcError::TemporarilyUnavailable(
-            "too many pending retrieve_btc requests".to_string(),
+            "too many pending retrieve requests".to_string(),
         ));
     }
 
-    let balance = balance_of(SyronLedger::BTC, ssi, 1).await?;
+    // @dev get guard for the account
+    let _guard = retrieve_btc_guard(ssi_account)?;
+
+    let balance = balance_of(SyronLedger::SYRON, ssi, 2).await?;
     if args.amount > balance {
         return Err(RetrieveBtcError::InsufficientFunds { balance });
     }
@@ -257,13 +265,19 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
     //     }
     //     BtcAddressCheckStatus::Clean => {}
     // }
-    let burn_memo = BurnMemo::Convert {
-        address: Some(ssi),
-        kyt_fee: Some(kyt_fee),
-        status: Some(Status::Accepted),
-    };
+
+    // let burn_memo = BurnMemo::Convert {
+    //     address: Some(ssi),
+    //     kyt_fee: Some(kyt_fee),
+    //     status: Some(Status::Accepted),
+    // };
+    
     let block_index =
-        burn_ckbtcs(args.amount, crate::memo::encode(&burn_memo).into(), ssi).await?;
+    // burn_ckbtcs(args.amount, crate::memo::encode(&burn_memo).into(), ssi).await?;
+    update_balance::syron_update(&ssi, 2, Some(ssi_nonce), args.amount)
+        .await
+        .map_err(|e| RetrieveBtcError::TemporarilyUnavailable(format!("syron_update failed: {:?}", e)))?;
+    
     let request = RetrieveBtcRequest {
         // NB. We charge the KYT fee from the retrieve amount.
         amount: args
@@ -275,14 +289,14 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
         received_at: ic_cdk::api::time(),
         kyt_provider: None,//Some(kyt_provider),
         reimbursement_account: Some(Account {
-            owner: minter,
-            subaccount: Some(ssi_subaccount) // @review (mint) consider new ssi subaccount for syron allowance
+            owner: ic_cdk::id(),
+            subaccount: Some(balance_subaccount) // @review (alpha) reimbursement process
         }),
     };
 
     log!(
         P1,
-        "accepted a retrieve btc request for {} BTC to address {} (block_index = {})",
+        "accepted a retrieve request for amt ({}) to address ({}) & block_index ({})",
         crate::tx::DisplayAmount(request.amount),
         ssi,
         request.block_index
@@ -300,155 +314,156 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, Retrie
     Ok(RetrieveBtcOk { block_index })
 }
 
-pub async fn retrieve_btc_with_approval(
-    args: RetrieveBtcWithApprovalArgs,
-) -> Result<RetrieveBtcOk, RetrieveBtcWithApprovalError> {
-    let caller = ic_cdk::caller();
+// @review (alpha) deprecated
+// pub async fn retrieve_btc_with_approval(
+//     args: RetrieveBtcWithApprovalArgs,
+// ) -> Result<RetrieveBtcOk, RetrieveBtcWithApprovalError> {
+//     let caller = ic_cdk::caller();
 
-    state::read_state(|s| s.mode.is_withdrawal_available_for(&caller))
-        .map_err(RetrieveBtcWithApprovalError::TemporarilyUnavailable)?;
+//     state::read_state(|s| s.mode.is_withdrawal_available_for(&caller))
+//         .map_err(RetrieveBtcWithApprovalError::TemporarilyUnavailable)?;
 
-    if crate::blocklist::BTC_ADDRESS_BLOCKLIST
-        .binary_search(&args.address.trim())
-        .is_ok()
-    {
-        ic_cdk::trap("attempted to retrieve BTC to a blocked address");
-    }
+//     if crate::blocklist::BTC_ADDRESS_BLOCKLIST
+//         .binary_search(&args.address.trim())
+//         .is_ok()
+//     {
+//         ic_cdk::trap("attempted to retrieve BTC to a blocked address");
+//     }
 
-    let ecdsa_public_key = init_ecdsa_public_key().await;
-    let main_address = account_to_bitcoin_address(
-        &ecdsa_public_key,
-        &Account {
-            owner: ic_cdk::id(),
-            subaccount: None,
-        },
-        &args.ssi
-    );
+//     let ecdsa_public_key = init_ecdsa_public_key().await;
+//     let main_address = account_to_bitcoin_address(
+//         &ecdsa_public_key,
+//         &Account {
+//             owner: ic_cdk::id(),
+//             subaccount: None,
+//         },
+//         &args.ssi
+//     );
 
-    if args.address == main_address.display(state::read_state(|s| s.btc_network)) {
-        ic_cdk::trap("illegal retrieve_btc target");
-    }
+//     if args.address == main_address.display(state::read_state(|s| s.btc_network)) {
+//         ic_cdk::trap("illegal retrieve_btc target");
+//     }
 
-    let _guard = retrieve_btc_guard(caller)?;
+//     let _guard = retrieve_btc_guard(caller)?;
     
-    let (min_retrieve_amount, btc_network, kyt_fee) =
-        read_state(|s| (s.retrieve_btc_min_amount, s.btc_network, s.kyt_fee));
+//     let (min_retrieve_amount, btc_network, kyt_fee) =
+//         read_state(|s| (s.retrieve_btc_min_amount, s.btc_network, s.kyt_fee));
     
-    let min_amount = max(min_retrieve_amount, kyt_fee);
+//     let min_amount = max(min_retrieve_amount, kyt_fee);
     
-    if args.amount < min_amount {
-        return Err(RetrieveBtcWithApprovalError::AmountTooLow(min_amount));
-    }
-    let parsed_address = BitcoinAddress::parse(&args.address, btc_network)?;
+//     if args.amount < min_amount {
+//         return Err(RetrieveBtcWithApprovalError::AmountTooLow(min_amount));
+//     }
+//     let parsed_address = BitcoinAddress::parse(&args.address, btc_network)?;
     
-    if read_state(|s| s.count_incomplete_retrieve_btc_requests() >= MAX_CONCURRENT_PENDING_REQUESTS)
-    {
-        return Err(RetrieveBtcWithApprovalError::TemporarilyUnavailable(
-            "too many pending retrieve_btc requests".to_string(),
-        ));
-    }
+//     if read_state(|s| s.count_incomplete_retrieve_btc_requests() >= MAX_CONCURRENT_PENDING_REQUESTS)
+//     {
+//         return Err(RetrieveBtcWithApprovalError::TemporarilyUnavailable(
+//             "too many pending retrieve_btc requests".to_string(),
+//         ));
+//     }
 
-    let burn_memo_icrc2 = BurnMemo::Convert {
-        address: Some(&args.address),
-        kyt_fee: Some(kyt_fee),
-        status: None,
-    };
-    let block_index = burn_ckbtcs_icrc2(
-        Account {
-            owner: caller,
-            subaccount: args.from_subaccount,
-        },
-        args.amount,
-        crate::memo::encode(&burn_memo_icrc2).into(),
-    )
-    .await?;
+//     let burn_memo_icrc2 = BurnMemo::Convert {
+//         address: Some(&args.address),
+//         kyt_fee: Some(kyt_fee),
+//         status: None,
+//     };
+//     let block_index = burn_ckbtcs_icrc2(
+//         Account {
+//             owner: caller,
+//             subaccount: args.from_subaccount,
+//         },
+//         args.amount,
+//         crate::memo::encode(&burn_memo_icrc2).into(),
+//     )
+//     .await?;
 
-    match kyt_check_address(caller, args.address.clone(), args.amount).await {
-        Ok(kyt_result) => {
-            let (_uuid, status, kyt_provider) = kyt_result;
-            match status {
-                BtcAddressCheckStatus::Tainted => {
-                    mutate_state(|s| {
-                        state::audit::schedule_deposit_reimbursement(
-                            s,
-                            Account {
-                                owner: caller,
-                                subaccount: args.from_subaccount,
-                            },
-                            args.amount,
-                            ReimbursementReason::TaintedDestination {
-                                kyt_provider,
-                                kyt_fee,
-                            },
-                            block_index,
-                        );
-                    });
-                    schedule_now(TaskType::ProcessLogic);
-                    return Err(RetrieveBtcWithApprovalError::GenericError {
-                        error_message: format!(
-                            "Destination address is tainted, KYT check fee deducted: {}",
-                            crate::tx::DisplayAmount(kyt_fee),
-                        ),
-                        error_code: ErrorCode::TaintedAddress as u64,
-                    });
-                }
-                BtcAddressCheckStatus::Clean => {}
-            }
+//     match kyt_check_address(caller, args.address.clone(), args.amount).await {
+//         Ok(kyt_result) => {
+//             let (_uuid, status, kyt_provider) = kyt_result;
+//             match status {
+//                 BtcAddressCheckStatus::Tainted => {
+//                     mutate_state(|s| {
+//                         state::audit::schedule_deposit_reimbursement(
+//                             s,
+//                             Account {
+//                                 owner: caller,
+//                                 subaccount: args.from_subaccount,
+//                             },
+//                             args.amount,
+//                             ReimbursementReason::TaintedDestination {
+//                                 kyt_provider,
+//                                 kyt_fee,
+//                             },
+//                             block_index,
+//                         );
+//                     });
+//                     schedule_now(TaskType::ProcessLogic);
+//                     return Err(RetrieveBtcWithApprovalError::GenericError {
+//                         error_message: format!(
+//                             "Destination address is tainted, KYT check fee deducted: {}",
+//                             crate::tx::DisplayAmount(kyt_fee),
+//                         ),
+//                         error_code: ErrorCode::TaintedAddress as u64,
+//                     });
+//                 }
+//                 BtcAddressCheckStatus::Clean => {}
+//             }
 
-            let request = RetrieveBtcRequest {
-                // NB. We charge the KYT fee from the retrieve amount.
-                amount: args
-                    .amount
-                    .checked_sub(kyt_fee)
-                    .expect("retrieve btc underflow"),
-                address: parsed_address,
-                block_index,
-                received_at: ic_cdk::api::time(),
-                kyt_provider: Some(kyt_provider),
-                reimbursement_account: Some(Account {
-                    owner: caller,
-                    subaccount: args.from_subaccount,
-                }),
-            };
+//             let request = RetrieveRequest {
+//                 // NB. We charge the KYT fee from the retrieve amount.
+//                 amount: args
+//                     .amount
+//                     .checked_sub(kyt_fee)
+//                     .expect("retrieve btc underflow"),
+//                 address: parsed_address,
+//                 block_index,
+//                 received_at: ic_cdk::api::time(),
+//                 kyt_provider: Some(kyt_provider),
+//                 reimbursement_account: Some(Account {
+//                     owner: caller,
+//                     subaccount: args.from_subaccount,
+//                 }),
+//             };
 
-            mutate_state(|s| state::audit::accept_retrieve_btc_request(s, request));
+//             mutate_state(|s| state::audit::accept_retrieve_btc_request(s, request));
 
-            assert_eq!(
-                crate::state::RetrieveBtcStatus::Pending,
-                read_state(|s| s.retrieve_btc_status(block_index))
-            );
+//             assert_eq!(
+//                 crate::state::RetrieveBtcStatus::Pending,
+//                 read_state(|s| s.retrieve_btc_status(block_index))
+//             );
 
-            schedule_now(TaskType::ProcessLogic);
+//             schedule_now(TaskType::ProcessLogic);
 
-            Ok(RetrieveBtcOk { block_index })
-        }
-        Err(error) => {
-            mutate_state(|s| {
-                state::audit::schedule_deposit_reimbursement(
-                    s,
-                    Account {
-                        owner: caller,
-                        subaccount: args.from_subaccount,
-                    },
-                    args.amount,
-                    ReimbursementReason::CallFailed,
-                    block_index,
-                );
-            });
+//             Ok(RetrieveBtcOk { block_index })
+//         }
+//         Err(error) => {
+//             mutate_state(|s| {
+//                 state::audit::schedule_deposit_reimbursement(
+//                     s,
+//                     Account {
+//                         owner: caller,
+//                         subaccount: args.from_subaccount,
+//                     },
+//                     args.amount,
+//                     ReimbursementReason::CallFailed,
+//                     block_index,
+//                 );
+//             });
 
-            schedule_now(TaskType::ProcessLogic);
+//             schedule_now(TaskType::ProcessLogic);
 
-            Err(RetrieveBtcWithApprovalError::GenericError {
-                error_message: format!(
-                    "Failed to call KYT canister with error: {:?}, will reimburse {} ckBTC",
-                    error,
-                    crate::tx::DisplayAmount(args.amount),
-                ),
-                error_code: ErrorCode::KytCallFailed as u64,
-            })
-        }
-    }
-}
+//             Err(RetrieveBtcWithApprovalError::GenericError {
+//                 error_message: format!(
+//                     "Failed to call KYT canister with error: {:?}, will reimburse {} syron",
+//                     error,
+//                     crate::tx::DisplayAmount(args.amount),
+//                 ),
+//                 error_code: ErrorCode::KytCallFailed as u64,
+//             })
+//         }
+//     }
+// }
 
 pub async fn balance_of(ledger: SyronLedger, ssi: &str, nonce: u64) -> Result<u64, RetrieveBtcError> {
     let minter = ic_cdk::id();
@@ -458,14 +473,12 @@ pub async fn balance_of(ledger: SyronLedger, ssi: &str, nonce: u64) -> Result<u6
             runtime: CdkRuntime,
             ledger_canister_id: read_state(|s| s.ledger_id.get().into()),
         },
-        SyronLedger::SUSD => ICRC1Client {
+        SyronLedger::SYRON => ICRC1Client {
             runtime: CdkRuntime,
             ledger_canister_id: read_state(|s| s.susd_id.get().into()),
         }
     };
 
-    // @review (burn) Users must send SYRON to their safety deposit boxes to withdraw/redeem BTC.
-    
     let subaccount = compute_subaccount(nonce, ssi);
     let result = client
         .balance_of(Account {

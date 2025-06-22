@@ -1,7 +1,7 @@
 use crate::lifecycle::init::InitArgs;
 use crate::lifecycle::upgrade::UpgradeArgs;
 use crate::state::{
-    ChangeOutput, CkBtcMinterState, FinalizedBtcRetrieval, FinalizedStatus, Overdraft,
+    ChangeOutput, MinterState, FinalizedBtcRetrieval, FinalizedStatus, Overdraft,
     RetrieveBtcRequest, SubmittedBtcTransaction, UtxoCheckStatus,
 };
 use crate::state::{ReimburseDepositTask, ReimbursedDeposit, ReimbursementReason};
@@ -31,8 +31,9 @@ pub enum Event {
     /// The minter emits this event _after_ it minted ckBTC.
     #[serde(rename = "received_utxos")]
     ReceivedUtxos {
-        /// The index of the transaction that mints ckBTC corresponding to the
-        /// received UTXOs.
+        #[serde(rename = "is_runes")]
+        is_runes: bool,
+        /// The index of the ledger transaction corresponding to the received UTXOs.
         #[serde(rename = "mint_txid")]
         #[serde(skip_serializing_if = "Option::is_none")]
         mint_txid: Option<u64>,
@@ -67,9 +68,12 @@ pub enum Event {
         /// The Txid of the Bitcoin transaction.
         #[serde(rename = "txid")]
         txid: Txid,
-        /// UTXOs used for the transaction.
-        #[serde(rename = "utxos")]
-        utxos: Vec<Utxo>,
+        /// Runes UTXOs used for the transaction.
+        #[serde(rename = "used_runes_utxos")]
+        used_runes_utxos: Vec<Utxo>,
+        /// Sats UTXOs used for the transaction.
+        #[serde(rename = "used_sats_utxos")]
+        used_sats_utxos: Vec<Utxo>,
         /// The output with the minter's change, if any.
         #[serde(rename = "change_output")]
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,9 +192,9 @@ pub enum ReplayLogError {
 }
 
 /// Reconstructs the minter state from an event log.
-pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<CkBtcMinterState, ReplayLogError> {
+pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<MinterState, ReplayLogError> {
     let mut state = match events.next() {
-        Some(Event::Init(args)) => CkBtcMinterState::from(args),
+        Some(Event::Init(args)) => MinterState::from(args),
         Some(evt) => {
             return Err(ReplayLogError::InconsistentLog(format!(
                 "The first event is not Init: {:?}",
@@ -207,8 +211,8 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<CkBtcMinterStat
             }
             Event::Upgrade(args) => state.upgrade(args),
             Event::ReceivedUtxos {
-                to_account, utxos, ..
-            } => state.add_utxos(to_account, utxos),
+                is_runes, to_account, utxos, ..
+            } => state.add_utxos(is_runes, to_account, utxos),
             Event::AcceptedRetrieveBtcRequest(req) => {
                 if let Some(account) = req.reimbursement_account {
                     state
@@ -235,7 +239,8 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<CkBtcMinterStat
             Event::SentBtcTransaction {
                 request_block_indices,
                 txid,
-                utxos,
+                used_runes_utxos,
+                used_sats_utxos,
                 fee_per_vbyte,
                 change_output,
                 submitted_at,
@@ -250,13 +255,14 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<CkBtcMinterStat
                     })?;
                     retrieve_btc_requests.push(request);
                 }
-                for utxo in utxos.iter() {
+                for utxo in used_runes_utxos.iter() {
                     state.available_utxos.remove(utxo);
                 }
                 state.push_submitted_transaction(SubmittedBtcTransaction {
                     requests: retrieve_btc_requests,
                     txid,
-                    used_utxos: utxos,
+                    used_runes_utxos,
+                    used_sats_utxos,
                     fee_per_vbyte,
                     change_output,
                     submitted_at,
@@ -269,12 +275,12 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<CkBtcMinterStat
                 submitted_at,
                 fee_per_vbyte,
             } => {
-                let (requests, used_utxos) = match state
+                let (requests, used_runes_utxos, used_sats_utxos) = match state
                     .submitted_transactions
                     .iter()
                     .find(|tx| tx.txid == old_txid)
                 {
-                    Some(tx) => (tx.requests.clone(), tx.used_utxos.clone()),
+                    Some(tx) => (tx.requests.clone(), tx.used_runes_utxos.clone(), tx.used_sats_utxos.clone()),
                     None => {
                         return Err(ReplayLogError::InconsistentLog(format!(
                             "Cannot replace a non-existent transaction {}",
@@ -288,7 +294,8 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<CkBtcMinterStat
                     SubmittedBtcTransaction {
                         txid: new_txid,
                         requests,
-                        used_utxos,
+                        used_runes_utxos,
+                        used_sats_utxos,
                         change_output: Some(change_output),
                         submitted_at,
                         fee_per_vbyte: Some(fee_per_vbyte),

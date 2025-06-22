@@ -37,6 +37,9 @@ pub enum BitcoinAddress {
     /// Pay to script hash address.
     #[serde(rename = "p2sh")]
     P2sh([u8; 20]),
+    /// OP_RETURN
+    #[serde(rename = "op_return")]
+    OpReturn(Vec<u8>)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,6 +69,7 @@ impl BitcoinAddress {
                 script_hash,
             ),
             Self::P2trV1(pkhash) => encode_bech32(network, pkhash, WitnessVersion::V1),
+            Self::OpReturn(data) => format!("OP_RETURN({:x?})", data),
         }
     }
 

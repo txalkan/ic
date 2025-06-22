@@ -1,7 +1,8 @@
-use crate::state::{mutate_state, CkBtcMinterState};
-use candid::Principal;
+use crate::state::{mutate_state, MinterState};
+//use candid::Principal;
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
+use icrc_ledger_types::icrc1::account::Account;
 
 const MAX_CONCURRENT: usize = 100;
 
@@ -12,21 +13,21 @@ pub enum GuardError {
 }
 
 pub trait PendingRequests {
-    fn pending_requests(state: &mut CkBtcMinterState) -> &mut BTreeSet<Principal>;
+    fn pending_requests(state: &mut MinterState) -> &mut BTreeSet<Account>;
 }
 
 pub struct PendingBalanceUpdates;
 
 impl PendingRequests for PendingBalanceUpdates {
-    fn pending_requests(state: &mut CkBtcMinterState) -> &mut BTreeSet<Principal> {
-        &mut state.update_balance_principals
+    fn pending_requests(state: &mut MinterState) -> &mut BTreeSet<Account> {
+        &mut state.update_balance_accounts
     }
 }
 pub struct RetrieveBtcUpdates;
 
 impl PendingRequests for RetrieveBtcUpdates {
-    fn pending_requests(state: &mut CkBtcMinterState) -> &mut BTreeSet<Principal> {
-        &mut state.retrieve_btc_principals
+    fn pending_requests(state: &mut MinterState) -> &mut BTreeSet<Account> {
+        &mut state.retrieve_btc_accounts
     }
 }
 
@@ -34,7 +35,7 @@ impl PendingRequests for RetrieveBtcUpdates {
 /// executed [MAX_CONCURRENT] or more times in parallel.
 #[must_use]
 pub struct Guard<PR: PendingRequests> {
-    principal: Principal,
+    account: Account,
     _marker: PhantomData<PR>,
 }
 
@@ -42,18 +43,18 @@ impl<PR: PendingRequests> Guard<PR> {
     /// Attempts to create a new guard for the current block. Fails if there is
     /// already a pending request for the specified [principal] or if there
     /// are at least [MAX_CONCURRENT] pending requests.
-    pub fn new(principal: Principal) -> Result<Self, GuardError> {
+    pub fn new(account: Account) -> Result<Self, GuardError> {
         mutate_state(|s| {
-            let principals = PR::pending_requests(s);
-            if principals.contains(&principal) {
+            let accounts = PR::pending_requests(s);
+            if accounts.contains(&account) {
                 return Err(GuardError::AlreadyProcessing);
             }
-            if principals.len() >= MAX_CONCURRENT {
+            if accounts.len() >= MAX_CONCURRENT {
                 return Err(GuardError::TooManyConcurrentRequests);
             }
-            principals.insert(principal);
+            accounts.insert(account);
             Ok(Self {
-                principal,
+                account,
                 _marker: PhantomData,
             })
         })
@@ -62,7 +63,7 @@ impl<PR: PendingRequests> Guard<PR> {
 
 impl<PR: PendingRequests> Drop for Guard<PR> {
     fn drop(&mut self) {
-        mutate_state(|s| PR::pending_requests(s).remove(&self.principal));
+        mutate_state(|s| PR::pending_requests(s).remove(&self.account));
     }
 }
 
@@ -112,11 +113,11 @@ impl Drop for DistributeKytFeeGuard {
     }
 }
 
-pub fn balance_update_guard(p: Principal) -> Result<Guard<PendingBalanceUpdates>, GuardError> {
+pub fn balance_update_guard(p: Account) -> Result<Guard<PendingBalanceUpdates>, GuardError> {
     Guard::new(p)
 }
 
-pub fn retrieve_btc_guard(p: Principal) -> Result<Guard<RetrieveBtcUpdates>, GuardError> {
+pub fn retrieve_btc_guard(p: Account) -> Result<Guard<RetrieveBtcUpdates>, GuardError> {
     Guard::new(p)
 }
 
@@ -144,6 +145,7 @@ mod tests {
             ledger_id: CanisterId::from_u64(42),
             susd_id: CanisterId::from_u64(42),
             xrc_id: CanisterId::from_u64(42),
+            siwb_id: CanisterId::from_u64(42),
             max_time_in_queue_nanos: 0,
             min_confirmations: None,
             mode: crate::state::Mode::GeneralAvailability,

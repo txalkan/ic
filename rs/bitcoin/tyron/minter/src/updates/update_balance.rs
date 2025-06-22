@@ -39,7 +39,7 @@ pub struct UpdateBalanceArgs {
 /// The outcome of UTXO processing.
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum UtxoStatus {
-    /// The UTXO has a transfer inscription
+    /// The UTXO might have a transfer inscription
     TransferInscription(Utxo),
     /// The UTXO value does not cover the KYT check cost.
     ValueTooSmall(Utxo),
@@ -57,6 +57,7 @@ pub enum UtxoStatus {
         /// The UTXO that caused the balance update.
         utxo: Utxo,
     },
+    Read(Utxo)
 }
 
 pub enum ErrorCode {
@@ -336,15 +337,20 @@ pub async fn update_ssi_balance(
     args: GetBoxAddressArgs,
 ) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
     let minter = ic_cdk::id();
+    // @dev get user ssi account
+    let ssi_subaccount = compute_subaccount(0, &args.ssi);
+    let ssi_account = Account {
+        owner: minter,
+        subaccount: Some(ssi_subaccount)
+    };
 
-    state::read_state(|s| s.mode.is_deposit_available_for(&minter))
+    state::read_state(|s| s.mode.is_deposit_available_for(&ssi_account))
         .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
 
-    // init_ecdsa_public_key().await;
-    let _guard = balance_update_guard(minter/*args.owner.unwrap_or(caller)*/)?;
+    let _guard = balance_update_guard(ssi_account.clone())?;
 
     let ssi_box_subaccount = compute_subaccount(1, &args.ssi);
-
+    
     let mut utxo_statuses: Vec<UtxoStatus> = vec![];
 
     match args.op {
@@ -373,8 +379,8 @@ pub async fn update_ssi_balance(
         
             let new_utxos = state::read_state(|s| s.new_utxos_for_account(utxos, &ssi_box_account));
         
-            // Remove pending finalized transactions for the minter. @review (mainnet) consider the user subaccount.
-            state::mutate_state(|s| s.finalized_utxos.remove(&minter));
+            // Remove pending finalized transactions
+            state::mutate_state(|s| s.finalized_utxos.remove(&ssi_box_account));
         
             let btc_deposit = new_utxos.iter().map(|u| u.value).sum::<u64>();
         
@@ -425,8 +431,8 @@ pub async fn update_ssi_balance(
             }
         
             let token_name = match btc_network {
-                ic_management_canister_types::BitcoinNetwork::Mainnet => "SUSD",
-                _ => "tSUSD",
+                ic_management_canister_types::BitcoinNetwork::Mainnet => "syron",
+                _ => "tSyron",
             };
 
             let kyt_fee = read_state(|s| s.kyt_fee);
@@ -445,7 +451,7 @@ pub async fn update_ssi_balance(
                     continue;
                 }
         
-                // @review (inscription) dust limit
+                // @review (governance) dust limit
                 if utxo.value < 600 {
                     mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
                     utxo_statuses.push(UtxoStatus::TransferInscription(utxo));
@@ -476,14 +482,6 @@ pub async fn update_ssi_balance(
                             DisplayOutpoint(&utxo.outpoint),
                             DisplayAmount(utxo.value),
                         );
-                        state::mutate_state(|s| {
-                            state::audit::add_utxos(
-                                s,
-                                Some(block_index[0]),
-                                ssi_box_account,
-                                vec![utxo.clone()],
-                            )
-                        });
                         utxo_statuses.push(UtxoStatus::Minted {
                             block_index: block_index[0],
                             utxo,
@@ -491,7 +489,6 @@ pub async fn update_ssi_balance(
                         });
                     }
                     Err(err) => {
-                        return Err(err);
                         log!(
                             P0,
                             "Failed to mint for UTXO {}: {:?}",
@@ -499,6 +496,7 @@ pub async fn update_ssi_balance(
                             err
                         );
                         utxo_statuses.push(UtxoStatus::Checked(utxo));
+                        return Err(err);
                     }
                 }
             }
@@ -516,7 +514,7 @@ pub async fn update_ssi_balance(
             };
 
             let btc_1 = balance_of(SyronLedger::BTC, &args.ssi, 1).await.unwrap_or(0);
-            let susd_1 = balance_of(SyronLedger::SUSD, &args.ssi, 1).await.unwrap_or(0);
+            let susd_1 = balance_of(SyronLedger::SYRON, &args.ssi, 1).await.unwrap_or(0);
     
             // @dev Throw an error if any of the balances is zero
             if btc_1 == 0 || susd_1 == 0 {
@@ -591,6 +589,195 @@ pub async fn update_ssi_balance(
     Ok(utxo_statuses)
 }
 
+/// Notifies the minter to update its own balance of syron runes.
+pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
+    // @dev get minter runes address
+    let dao_addr = state::read_state(|s| s.dao_addr.clone());
+    let minter_address = &dao_addr[2];
+
+    let (btc_network, min_confirmations) =
+        state::read_state(|s| (s.btc_network, s.min_confirmations));
+        
+    let minter = minter_address.display(btc_network); 
+    let subaccount = compute_subaccount(0, &minter);
+    let account = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(subaccount)
+    };
+    state::read_state(|s| s.mode.is_deposit_available_for(&account))
+        .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
+
+    let _guard = balance_update_guard(account.clone())?;
+
+    let mut utxo_statuses: Vec<UtxoStatus> = vec![];
+
+    let new_sats_utxos = state::read_state(|s| s.new_utxos_for_account(utxos.0, &account));
+    let new_runes_utxos = state::read_state(|s| s.new_utxos_for_account(utxos.1, &account));
+    let mut total_utxos = new_sats_utxos.clone();
+    total_utxos.extend(new_runes_utxos.clone());
+
+    // Remove pending finalized transactions for the account
+    state::mutate_state(|s| s.finalized_utxos.remove(&account));
+
+    let btc_deposit = total_utxos.iter().map(|u| u.value).sum::<u64>();
+
+    if btc_deposit == 0 {
+        // We bail out early if there are no UTXOs to avoid creating a new entry
+        // in the UTXOs map. If we allowed empty entries, malicious callers
+        // could exhaust the canister memory.
+
+        // We get the entire list of UTXOs again with a zero
+        // confirmation limit so that we can indicate the approximate
+        // wait time to the caller.
+        let GetUtxosResponse {
+            tip_height,
+            mut utxos,
+            ..
+        } = get_utxos(
+            btc_network,
+            &minter,
+            min_confirmations,
+            CallSource::Client,
+        )
+        .await?;
+
+        utxos.retain(|u| {
+            tip_height
+                < u.height
+                    .checked_add(min_confirmations)
+                    .expect("bug: this shouldn't overflow")
+                    .checked_sub(1)
+                    .expect("bug: this shouldn't underflow")
+        });
+        let pending_utxos: Vec<PendingUtxo> = utxos
+            .iter()
+            .map(|u| PendingUtxo {
+                outpoint: u.outpoint.clone(),
+                value: u.value,
+                confirmations: tip_height - u.height + 1,
+            })
+            .collect();
+
+        let current_confirmations = pending_utxos.iter().map(|u| u.confirmations).max();
+
+        return Err(UpdateBalanceError::NoNewUtxos {
+            current_confirmations,
+            required_confirmations: min_confirmations,
+            pending_utxos: Some(pending_utxos),
+        });
+    }
+
+    // @dev use box subaccount for gas and runes subaccount for stablecoin
+    let box_subaccount = compute_subaccount(1, &minter);
+    let box_account = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(box_subaccount)
+    };
+
+    let runes_subaccount = compute_subaccount(4, &minter);
+    let runes_account = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(runes_subaccount)
+    };
+
+
+    for utxo in new_sats_utxos {
+        let memo = MintMemo::Convert {
+            txid: Some(utxo.outpoint.txid.as_ref()),
+            vout: Some(utxo.outpoint.vout),
+            kyt_fee: None,
+        };
+
+        match count_runes_minter(utxo.value, box_account, crate::memo::encode(&memo).into()).await {
+            Ok(block_index) => {
+                state::mutate_state(|s| {
+                    state::audit::add_utxos(
+                        false,
+                        s,
+                        Some(block_index),
+                        account,
+                        vec![utxo.clone()],
+                    )
+                });
+                utxo_statuses.push(UtxoStatus::Read(utxo));
+            }
+            Err(err) => {
+                log!(
+                    P0,
+                    "Failed to mint for UTXO {}: {:?}",
+                    DisplayOutpoint(&utxo.outpoint),
+                    err
+                );
+                utxo_statuses.push(UtxoStatus::Checked(utxo));
+                return Err(err);
+            }
+        }
+    }
+
+    for utxo in new_runes_utxos {
+        let memo = MintMemo::Convert {
+            txid: Some(utxo.outpoint.txid.as_ref()),
+            vout: Some(utxo.outpoint.vout),
+            kyt_fee: None,
+        };
+
+        match count_runes_minter(utxo.value, runes_account, crate::memo::encode(&memo).into()).await {
+            Ok(block_index) => {
+                state::mutate_state(|s| {
+                    state::audit::add_utxos(
+                        true,
+                        s,
+                        Some(block_index),
+                        account,
+                        vec![utxo.clone()],
+                    )
+                });
+                utxo_statuses.push(UtxoStatus::Read(utxo));
+            }
+            Err(err) => {
+                log!(
+                    P0,
+                    "Failed to mint for UTXO {}: {:?}",
+                    DisplayOutpoint(&utxo.outpoint),
+                    err
+                );
+                utxo_statuses.push(UtxoStatus::Checked(utxo));
+                return Err(err);
+            }
+        }
+    }
+
+    schedule_now(TaskType::ProcessLogic);
+
+    Ok(utxo_statuses)
+}
+
+async fn count_runes_minter(runes: u64, to: Account, memo: Memo) -> Result<u64, UpdateBalanceError> {
+    let btc_client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
+    };
+
+    let block_index = btc_client
+        .transfer(TransferArg {
+            from_subaccount: None,
+            to,
+            fee: None,
+            created_at_time: None,
+            memo: None, //Some(memo), // @review (alpha) 'the memo field size of 39 bytes is above the allowed limit of 32 bytes'.
+            amount: Nat::from(runes),
+        })
+        .await
+        .map_err(|(code, msg)| {
+            UpdateBalanceError::TemporarilyUnavailable(format!(
+                "cannot add runes balance: {} (reject_code = {})",
+                msg, code
+            ))
+            })??;
+
+    Ok(block_index.0.to_u64().expect("nat does not fit into u64"))
+}
+
 async fn _kyt_check_utxo(
     caller: Principal,
     utxo: &Utxo,
@@ -650,7 +837,7 @@ async fn _kyt_check_utxo(
     }
 }
 
-/// Registers the amount of locked BTC, the SUSD loan, and the SUSD balance.
+/// Registers the amount of bitcoin collateral, the syron loan, and the available balance.
 pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, account: Account) -> Result<Vec<u64 /*UtxoStatus*/>, UpdateBalanceError> {
     let collateralized_account = get_collateralized_account(ssi).await?;
     let exchange_rate = collateralized_account.exchange_rate;
@@ -688,13 +875,13 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
             to,
             fee: None,
             created_at_time: None,
-            memo: None,//Some(memo),
+            memo: None,//Some(memo.clone()), @review (alpha) 'the memo field size of 39 bytes is above the allowed limit of 32 bytes'.
             amount: Nat::from(satoshis),
         })
         .await
         .map_err(|(code, msg)| {
             UpdateBalanceError::TemporarilyUnavailable(format!(
-                "cannot account BTC: {} (reject_code = {})",
+                "cannot register bitcoin collateral due to error ({} - reject_code = {})",
                 msg, code
             ))
         })??;
@@ -716,13 +903,13 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
                 to,
                 fee: None,
                 created_at_time: None,
-                memo: None,
+                memo: None, //Some(memo.clone()), @review (alpha) 'the memo field size of 39 bytes is above the allowed limit of 32 bytes'.
                 amount: Nat::from(susd),
             })
             .await
             .map_err(|(code, msg)| {
                 UpdateBalanceError::TemporarilyUnavailable(format!(
-                    "cannot grant SUSD loan: {} (reject_code = {})",
+                    "cannot grant syron loan due to error ({} - reject_code = {})",
                     msg, code
                 ))
             })??;
@@ -733,13 +920,13 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
                 to: account,
                 fee: None,
                 created_at_time: None,
-                memo: None,
+                memo: None, //Some(memo.clone()), @review (alpha) 'the memo field size of 39 bytes is above the allowed limit of 32 bytes'.
                 amount: Nat::from(susd),
             })
             .await
             .map_err(|(code, msg)| {
                 UpdateBalanceError::TemporarilyUnavailable(format!(
-                    "cannot update SUSD balance: {} (reject_code = {})",
+                    "cannot update syron balance due to error ({} - reject_code = {})", // @review (alpha) if it fails, make sure that the fn fails entirely (revert previous updates in collateral and loan)
                     msg, code
                 ))
             })??;
@@ -764,7 +951,7 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
     Ok(res)
 }
 
-pub async fn syron_update(ssi: &str, from: u64, to: Option<u64>, susd: u64) -> Result<Vec<u64>, UpdateBalanceError> {
+pub async fn syron_update(ssi: &str, from: u64, to: Option<u64>, amt: u64) -> Result<u64, UpdateBalanceError> {
     let from_subaccount = Some(compute_subaccount(from, ssi));
     
     let to_account: Account = match to {
@@ -775,7 +962,7 @@ pub async fn syron_update(ssi: &str, from: u64, to: Option<u64>, susd: u64) -> R
                 subaccount: Some(to_subaccount)
             }
         },
-        None => Account {
+        None => Account { // means burning the stablecoin
             owner: ic_cdk::id(),
             subaccount: None
         }
@@ -792,7 +979,7 @@ pub async fn syron_update(ssi: &str, from: u64, to: Option<u64>, susd: u64) -> R
         fee: None,
         created_at_time: None,
         memo: None,
-        amount: Nat::from(susd),
+        amount: Nat::from(amt),
     })
     .await
     .map_err(|(code, msg)| {
@@ -804,8 +991,8 @@ pub async fn syron_update(ssi: &str, from: u64, to: Option<u64>, susd: u64) -> R
         }
     })??;
     
-    let res = [block_index_susd.0.to_u64().expect("nat does not fit into u64")];
-    Ok(res.to_vec())
+    let res = block_index_susd.0.to_u64().expect("nat does not fit into u64");
+    Ok(res)
 }
 
 pub async fn btc_bal_update(ssi: &str, from: u64, to: Option<u64>, amt: u64) -> Result<Vec<u64>, UpdateBalanceError> {
@@ -855,9 +1042,9 @@ pub async fn btc_bal_update(ssi: &str, from: u64, to: Option<u64>, amt: u64) -> 
 pub async fn get_collateralized_account(ssi: &str) -> Result<CollateralizedAccount, UpdateBalanceError> {
     let xr = fetch_btc_exchange_rate("USD".to_string()).await??;
     let btc_1 = balance_of(SyronLedger::BTC, ssi, 1).await.unwrap_or(0);
-    let susd_1 = balance_of(SyronLedger::SUSD, ssi, 1).await.unwrap_or(0);
-    let susd_2 = balance_of(SyronLedger::SUSD, ssi, 2).await.unwrap_or(0);
-    let susd_3 = balance_of(SyronLedger::SUSD, ssi, 3).await.unwrap_or(0);
+    let susd_1 = balance_of(SyronLedger::SYRON, ssi, 1).await.unwrap_or(0);
+    let susd_2 = balance_of(SyronLedger::SYRON, ssi, 2).await.unwrap_or(0);
+    let susd_3 = balance_of(SyronLedger::SYRON, ssi, 3).await.unwrap_or(0);
     
     let exchange_rate: u64 = xr.rate / 1_000_000_000;
     

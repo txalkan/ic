@@ -1,5 +1,5 @@
 use crate::{
-    address::BitcoinAddress, logs::P1, state::{mutate_state, read_state, CkBtcMinterState}, ECDSAPublicKey
+    address::BitcoinAddress, logs::P1, state::{mutate_state, read_state, MinterState}, ECDSAPublicKey
 };
 use candid::{CandidType, Deserialize, Principal};
 use ic_base_types::PrincipalId;
@@ -35,7 +35,7 @@ pub struct GetBoxAddressArgs {
 }
 
 /// PRECONDITION: s.ecdsa_public_key.is_some()
-pub fn account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Account) -> String {
+pub fn account_to_p2wpkh_address_from_state(s: &MinterState, account: &Account) -> String {
     crate::address::account_to_p2wpkh_address(
         s.btc_network,
         s.ecdsa_public_key
@@ -45,7 +45,7 @@ pub fn account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Acco
     )
 }
 
-pub fn ssi_account_to_p2wpkh_address_from_state(s: &CkBtcMinterState, account: &Account, ssi: &str) -> String {
+pub fn ssi_account_to_p2wpkh_address_from_state(s: &MinterState, account: &Account, ssi: &str) -> String {
     crate::address::ssi_account_to_p2wpkh_address(
         s.ecdsa_public_key
             .as_ref()

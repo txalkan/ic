@@ -1,6 +1,6 @@
 use crate::lifecycle::upgrade::UpgradeArgs;
 pub use crate::state::Mode;
-use crate::state::{replace_state, CkBtcMinterState};
+use crate::state::{replace_state, MinterState};
 use candid::{CandidType, Deserialize};
 use ic_base_types::CanisterId;
 use ic_btc_interface::Network;
@@ -96,7 +96,7 @@ pub struct InitArgs {
 }
 
 pub fn init(args: InitArgs) {
-    let state: CkBtcMinterState = CkBtcMinterState::from(args);
+    let state: MinterState = MinterState::from(args);
     state.validate_config();
     replace_state(state);
 }

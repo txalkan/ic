@@ -1,7 +1,7 @@
 //! State modifications that should end up in the event log.
 
 use super::{
-    eventlog::Event, CkBtcMinterState, FinalizedBtcRetrieval, FinalizedStatus, RetrieveBtcRequest,
+    eventlog::Event, MinterState, FinalizedBtcRetrieval, FinalizedStatus, RetrieveBtcRequest,
     SubmittedBtcTransaction, UtxoCheckStatus,
 };
 use crate::state::{ReimburseDepositTask, ReimbursedDeposit};
@@ -11,7 +11,7 @@ use candid::Principal;
 use ic_btc_interface::{Txid, Utxo};
 use icrc_ledger_types::icrc1::account::Account;
 
-pub fn accept_retrieve_btc_request(state: &mut CkBtcMinterState, request: RetrieveBtcRequest) {
+pub fn accept_retrieve_btc_request(state: &mut MinterState, request: RetrieveBtcRequest) {
     record_event(&Event::AcceptedRetrieveBtcRequest(request.clone()));
     state.pending_retrieve_btc_requests.push(request.clone());
     if let Some(account) = request.reimbursement_account {
@@ -27,21 +27,23 @@ pub fn accept_retrieve_btc_request(state: &mut CkBtcMinterState, request: Retrie
 }
 
 pub fn add_utxos(
-    state: &mut CkBtcMinterState,
+    is_runes: bool,
+    state: &mut MinterState,
     mint_txid: Option<u64>,
     account: Account,
     utxos: Vec<Utxo>,
 ) {
     record_event(&Event::ReceivedUtxos {
+        is_runes,
         mint_txid,
         to_account: account,
         utxos: utxos.clone(),
     });
 
-    state.add_utxos(account, utxos);
+    state.add_utxos(is_runes, account, utxos);
 }
 
-pub fn remove_retrieve_btc_request(state: &mut CkBtcMinterState, request: RetrieveBtcRequest) {
+pub fn remove_retrieve_btc_request(state: &mut MinterState, request: RetrieveBtcRequest) {
     record_event(&Event::RemovedRetrieveBtcRequest {
         block_index: request.block_index,
     });
@@ -52,11 +54,12 @@ pub fn remove_retrieve_btc_request(state: &mut CkBtcMinterState, request: Retrie
     });
 }
 
-pub fn sent_transaction(state: &mut CkBtcMinterState, tx: SubmittedBtcTransaction) {
+pub fn sent_transaction(state: &mut MinterState, tx: SubmittedBtcTransaction) {
     record_event(&Event::SentBtcTransaction {
         request_block_indices: tx.requests.iter().map(|r| r.block_index).collect(),
         txid: tx.txid,
-        utxos: tx.used_utxos.clone(),
+        used_runes_utxos: tx.used_runes_utxos.clone(),
+        used_sats_utxos: tx.used_sats_utxos.clone(),
         change_output: tx.change_output.clone(),
         submitted_at: tx.submitted_at,
         fee_per_vbyte: tx.fee_per_vbyte,
@@ -65,13 +68,13 @@ pub fn sent_transaction(state: &mut CkBtcMinterState, tx: SubmittedBtcTransactio
     state.push_submitted_transaction(tx);
 }
 
-pub fn confirm_transaction(state: &mut CkBtcMinterState, txid: &Txid) {
+pub fn confirm_transaction(state: &mut MinterState, txid: &Txid) {
     record_event(&Event::ConfirmedBtcTransaction { txid: *txid });
     state.finalize_transaction(txid);
 }
 
 pub fn mark_utxo_checked(
-    state: &mut CkBtcMinterState,
+    state: &mut MinterState,
     utxo: &Utxo,
     uuid: String,
     status: UtxoCheckStatus,
@@ -86,13 +89,13 @@ pub fn mark_utxo_checked(
     state.mark_utxo_checked(utxo.clone(), uuid, status, kyt_provider);
 }
 
-pub fn ignore_utxo(state: &mut CkBtcMinterState, utxo: Utxo) {
+pub fn ignore_utxo(state: &mut MinterState, utxo: Utxo) {
     record_event(&Event::IgnoredUtxo { utxo: utxo.clone() });
     state.ignore_utxo(utxo);
 }
 
 pub fn replace_transaction(
-    state: &mut CkBtcMinterState,
+    state: &mut MinterState,
     old_txid: Txid,
     new_tx: SubmittedBtcTransaction,
 ) {
@@ -112,7 +115,7 @@ pub fn replace_transaction(
 }
 
 pub fn distributed_kyt_fee(
-    state: &mut CkBtcMinterState,
+    state: &mut MinterState,
     kyt_provider: Principal,
     amount: u64,
     block_index: u64,
@@ -126,7 +129,7 @@ pub fn distributed_kyt_fee(
 }
 
 pub fn retrieve_btc_kyt_failed(
-    state: &mut CkBtcMinterState,
+    state: &mut MinterState,
     owner: Principal,
     address: String,
     amount: u64,
@@ -146,7 +149,7 @@ pub fn retrieve_btc_kyt_failed(
 }
 
 pub fn schedule_deposit_reimbursement(
-    state: &mut CkBtcMinterState,
+    state: &mut MinterState,
     account: Account,
     amount: u64,
     reason: ReimbursementReason,
@@ -169,7 +172,7 @@ pub fn schedule_deposit_reimbursement(
 }
 
 pub fn reimbursed_failed_deposit(
-    state: &mut CkBtcMinterState,
+    state: &mut MinterState,
     burn_block_index: u64,
     mint_block_index: u64,
 ) {

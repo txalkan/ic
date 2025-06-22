@@ -1,4 +1,4 @@
-use candid::Principal;
+// use candid::Principal;
 use ic_canister_log::export as export_logs;
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 use ic_cdk_macros::{init, post_upgrade, query, update};
@@ -12,9 +12,9 @@ use ic_ckbtc_minter_tyron::state::{
 };
 use ic_ckbtc_minter_tyron::tasks::{schedule_now, TaskType};
 use ic_ckbtc_minter_tyron::updates::get_withdrawal_account::compute_subaccount;
-use ic_ckbtc_minter_tyron::updates::retrieve_btc::{
-    RetrieveBtcArgs, RetrieveBtcError, RetrieveBtcOk, RetrieveBtcWithApprovalArgs, RetrieveBtcWithApprovalError
-};
+// use ic_ckbtc_minter_tyron::updates::retrieve_btc::{
+//     RetrieveBtcArgs, RetrieveBtcError, RetrieveBtcOk, RetrieveBtcWithApprovalArgs, RetrieveBtcWithApprovalError
+// };
 use ic_ckbtc_minter_tyron::updates::{
     self,
     get_btc_address::GetBoxAddressArgs,
@@ -140,19 +140,19 @@ async fn get_withdrawal_account() -> Account {
     updates::get_withdrawal_account::get_withdrawal_account().await
 }
 
-#[update]
-async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, RetrieveBtcError> {
-    // check_anonymous_caller();
-    check_postcondition(updates::retrieve_btc::retrieve_btc(args).await)
-}
+// #[update]
+// async fn retrieve_btc(args: RetrieveBtcArgs) -> Result<RetrieveBtcOk, RetrieveBtcError> {
+//     // check_anonymous_caller();
+//     check_postcondition(updates::retrieve_btc::retrieve_btc(args).await)
+// }
 
-#[update]
-async fn retrieve_btc_with_approval(
-    args: RetrieveBtcWithApprovalArgs,
-) -> Result<RetrieveBtcOk, RetrieveBtcWithApprovalError> {
-    // check_anonymous_caller();
-    check_postcondition(updates::retrieve_btc::retrieve_btc_with_approval(args).await)
-}
+// #[update]
+// async fn retrieve_btc_with_approval(
+//     args: RetrieveBtcWithApprovalArgs,
+// ) -> Result<RetrieveBtcOk, RetrieveBtcWithApprovalError> {
+//     // check_anonymous_caller();
+//     check_postcondition(updates::retrieve_btc::retrieve_btc_with_approval(args).await)
+// }
 
 #[query]
 fn retrieve_btc_status(req: RetrieveBtcStatusRequest) -> RetrieveBtcStatus {

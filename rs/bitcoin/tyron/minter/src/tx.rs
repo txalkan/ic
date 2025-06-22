@@ -227,6 +227,10 @@ pub fn encode_address_script_pubkey(btc_address: &BitcoinAddress, buf: &mut impl
         BitcoinAddress::P2pkh(pkhash) => encode_sighash_script_code(pkhash, buf),
         BitcoinAddress::P2sh(pkhash) => encode_p2sh_script_code(pkhash, buf),
         BitcoinAddress::P2trV1(pk) => encode_p2tr_script_pubkey(pk, buf),
+        BitcoinAddress::OpReturn(runestone_bytes) => {
+            write_compact_size(runestone_bytes.len(), buf);
+            buf.write(runestone_bytes)
+        }
     }
 }
 

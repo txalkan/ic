@@ -25,23 +25,22 @@ use icrc_ledger_types::icrc1::account::Account;
 use serde::Serialize;
 use std::collections::btree_map::Entry;
 
-/// The maximum number of finalized BTC retrieval requests that we keep in the
-/// history.
+/// The maximum number of finalized requests that we keep in the history.
 const MAX_FINALIZED_REQUESTS: usize = 100;
 
 thread_local! {
-    static __STATE: RefCell<Option<CkBtcMinterState>> = RefCell::default();
+    static __STATE: RefCell<Option<MinterState>> = RefCell::default();
 }
 
 // A pending retrieve btc request
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetrieveBtcRequest {
-    /// The amount to convert to BTC.
-    /// The minter withdraws BTC transfer fees from this amount.
+    /// The amount to retrieve.
+    /// The minter takes fees from this amount.
     pub amount: u64,
     /// The destination BTC address (SSI address).
     pub address: BitcoinAddress,
-    /// The BURN transaction index on the ledger.
+    /// The transaction index on the ledger.
     /// Serves as a unique request identifier.
     pub block_index: u64,
     /// The time at which the minter accepted the request.
@@ -74,8 +73,10 @@ pub struct SubmittedBtcTransaction {
     pub requests: Vec<RetrieveBtcRequest>,
     /// The identifier of the unconfirmed transaction.
     pub txid: Txid,
-    /// The list of UTXOs we used in the transaction.
-    pub used_utxos: Vec<Utxo>,
+    /// The list of runes UTXOs we used in the transaction.
+    pub used_runes_utxos: Vec<Utxo>,
+    /// The list of UTXOs we used in the transaction for gas & output values if needed.
+    pub used_sats_utxos: Vec<Utxo>,
     /// The IC time at which we submitted the Bitcoin transaction.
     pub submitted_at: u64,
     /// The tx output from the submitted transaction that the minter owns.
@@ -100,9 +101,9 @@ pub struct FinalizedBtcRetrieval {
 pub enum FinalizedStatus {
     /// The request amount was to low to cover the fees.
     AmountTooLow,
-    /// The transaction that retrieves BTC got enough confirmations.
+    /// The retrieval transaction got enough confirmations.
     Confirmed {
-        /// The witness transaction identifier of the transaction.
+        /// The witness identifier of the transaction.
         txid: Txid,
     },
 }
@@ -124,7 +125,7 @@ pub enum RetrieveBtcStatus {
     Unknown,
     /// The request is in the batch queue.
     Pending,
-    /// Waiting for a signature on a transaction satisfy this request.
+    /// Waiting for a signature on a transaction to satisfy this request.
     Signing,
     /// Sending the transaction satisfying this request.
     Sending { txid: Txid },
@@ -148,10 +149,22 @@ impl From<RetrieveBtcStatus> for RetrieveBtcStatusV2 {
             RetrieveBtcStatus::Unknown => RetrieveBtcStatusV2::Unknown,
             RetrieveBtcStatus::Pending => RetrieveBtcStatusV2::Pending,
             RetrieveBtcStatus::Signing => RetrieveBtcStatusV2::Signing,
-            RetrieveBtcStatus::Sending { txid } => RetrieveBtcStatusV2::Sending { txid },
-            RetrieveBtcStatus::Submitted { txid } => RetrieveBtcStatusV2::Submitted { txid },
+            RetrieveBtcStatus::Sending { txid } => {
+                let txid_bytes = txid.as_ref().iter().rev().map(|n| *n as u8).collect::<Vec<u8>>();
+                let txid_hex = hex::encode(txid_bytes);
+                RetrieveBtcStatusV2::Sending { txid: txid_hex }
+            },
+            RetrieveBtcStatus::Submitted { txid } => {
+                 let txid_bytes = txid.as_ref().iter().rev().map(|n| *n as u8).collect::<Vec<u8>>();
+                let txid_hex = hex::encode(txid_bytes);
+                RetrieveBtcStatusV2::Submitted { txid: txid_hex }
+            },
             RetrieveBtcStatus::AmountTooLow => RetrieveBtcStatusV2::AmountTooLow,
-            RetrieveBtcStatus::Confirmed { txid } => RetrieveBtcStatusV2::Confirmed { txid },
+            RetrieveBtcStatus::Confirmed { txid } => {
+                let txid_bytes = txid.as_ref().iter().rev().map(|n| *n as u8).collect::<Vec<u8>>();
+                let txid_hex = hex::encode(txid_bytes);
+                RetrieveBtcStatusV2::Confirmed { txid: txid_hex }
+            }
         }
     }
 }
@@ -163,16 +176,16 @@ pub enum RetrieveBtcStatusV2 {
     Unknown,
     /// The request is in the batch queue.
     Pending,
-    /// Waiting for a signature on a transaction satisfy this request.
+    /// Waiting for a signature on a transaction to satisfy this request.
     Signing,
     /// Sending the transaction satisfying this request.
-    Sending { txid: Txid },
+    Sending { txid: String },
     /// Awaiting for confirmations on the transaction satisfying this request.
-    Submitted { txid: Txid },
+    Submitted { txid: String },
     /// The retrieval amount was too low. Satisfying the request is impossible.
     AmountTooLow,
     /// Confirmed a transaction satisfying this request.
-    Confirmed { txid: Txid },
+    Confirmed { txid: String },
     /// The retrieve bitcoin request has been reimbursed.
     Reimbursed(ReimbursedDeposit),
     /// The minter will try to reimburse this transaction.
@@ -184,17 +197,17 @@ pub enum RetrieveBtcStatusV2 {
 pub enum Mode {
     /// Minter's state is read-only.
     ReadOnly,
-    /// Only the specified principals can modify the minter's state.
-    RestrictedTo(Vec<Principal>),
-    /// Only the specified principals can deposit BTC.
-    DepositsRestrictedTo(Vec<Principal>),
+    /// Only the specified accounts can modify the minter's state. @review (governance)
+    RestrictedTo(Vec<Account>),
+    /// Only the specified accounts can retrieve
+    DepositsRestrictedTo(Vec<Account>),
     /// No restrictions on the minter interactions.
     GeneralAvailability,
 }
 
 impl Mode {
-    /// Returns Ok if the specified principal can convert BTC to ckBTC.
-    pub fn is_deposit_available_for(&self, p: &Principal) -> Result<(), String> {
+    /// Returns Ok if the specified account can retrieve
+    pub fn is_deposit_available_for(&self, p: &Account) -> Result<(), String> {
         match self {
             Self::GeneralAvailability => Ok(()),
             Self::ReadOnly => Err("the minter is in read-only mode".to_string()),
@@ -214,7 +227,7 @@ impl Mode {
     }
 
     /// Returns Ok if the specified principal can convert ckBTC to BTC.
-    pub fn is_withdrawal_available_for(&self, p: &Principal) -> Result<(), String> {
+    pub fn is_withdrawal_available_for(&self, p: &Account) -> Result<(), String> {
         match self {
             Self::GeneralAvailability | Self::DepositsRestrictedTo(_) => Ok(()),
             Self::ReadOnly => Err("the minter is in read-only mode".to_string()),
@@ -261,22 +274,17 @@ impl UtxoCheckStatus {
 #[derive(Clone, Copy, Debug)]
 pub struct Overdraft(pub u64);
 
-/// The state of the ckBTC Minter.
-///
+/// The state of the ckBTC Minter hacked by Tyron.
 /// Every piece of state of the Minter should be stored as field of this struct.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
-pub struct CkBtcMinterState {
+pub struct MinterState {
     /// The bitcoin network that the minter will connect to
     pub btc_network: Network,
 
     /// The bitcoin address of minter & treasury
     pub dao_addr: Vec<BitcoinAddress>,
 
-    /// Safety Deposit Boxes per SSI Bitcoin address @review update to BitcoinAddress
-    pub sdbs: BTreeMap<String, String>,
-
-    /// The name of the [EcdsaKeyId]. Use "dfx_test_key" for local replica and "test_key_1" for
-    /// a testing key for testnet and mainnet
+    /// The name of the [EcdsaKeyId]. Use "dfx_test_key" for local replica, "test_key_1" for testnet & "key_1" for mainnet
     pub ecdsa_key_name: String,
 
     /// The Minter ECDSA public key
@@ -285,15 +293,14 @@ pub struct CkBtcMinterState {
     /// The minimum number of confirmations on the Bitcoin chain.
     pub min_confirmations: u32,
 
-    /// Maximum time of nanoseconds that a transaction should spend in the queue
-    /// before being sent.
+    /// Maximum time of nanoseconds that a transaction should spend in the queue before being sent.
     pub max_time_in_queue_nanos: u64,
 
-    /// Per-principal lock for update_balance
-    pub update_balance_principals: BTreeSet<Principal>,
+    /// Per-user lock for update_balance
+    pub update_balance_accounts: BTreeSet<Account>,
 
-    /// Per-principal lock for retrieve_btc
-    pub retrieve_btc_principals: BTreeSet<Principal>,
+    /// Per-user lock for retrieve_btc
+    pub retrieve_btc_accounts: BTreeSet<Account>,
 
     /// Minimum amount of bitcoin that can be retrieved
     pub retrieve_btc_min_amount: u64,
@@ -312,7 +319,7 @@ pub struct CkBtcMinterState {
     /// Last transaction submission timestamp.
     pub last_transaction_submission_time_ns: Option<u64>,
 
-    /// BTC transactions waiting for finalization.
+    /// Bitcoin transactions waiting for finalization.
     pub submitted_transactions: Vec<SubmittedBtcTransaction>,
 
     /// Transactions that likely didn't make it into the mempool.
@@ -329,10 +336,10 @@ pub struct CkBtcMinterState {
     /// The total number of finalized requests.
     pub finalized_requests_count: u64,
 
-    /// The total amount of ckBTC minted.
+    /// The total amount of Syron minted.
     pub tokens_minted: u64,
 
-    /// The total amount of ckBTC burned.
+    /// The total amount of Syron burned.
     pub tokens_burned: u64,
 
     /// The CanisterId of the Syron Ledger for BTC.
@@ -344,14 +351,17 @@ pub struct CkBtcMinterState {
     /// The CanisterId of the Exchange Rate Canister.
     pub xrc_id: CanisterId,
 
-    /// The CanisterId of the Sign In With Bitcoin canister. @update state
+    /// The CanisterId of the Sign In With Bitcoin canister.
     pub siwb_id: CanisterId,
 
     /// The principal of the KYT canister.
     pub kyt_principal: Option<CanisterId>,
 
-    /// The set of UTXOs unused in pending transactions.
+    /// The set of UTXOs unused in pending transactions (for runes).
     pub available_utxos: BTreeSet<Utxo>,
+
+    /// The set of UTXOs unused in pending transactions (for gas & output values if needed).
+    pub available_sats_utxos: BTreeSet<Utxo>,
 
     /// The mapping from output points to the ledger accounts to which they
     /// belong.
@@ -368,7 +378,7 @@ pub struct CkBtcMinterState {
     /// We insert a new entry into this map if we discover a concurrent
     /// update_balance calls during a transaction finalization and remove the
     /// entry once the update_balance call completes.
-    pub finalized_utxos: BTreeMap<Principal, BTreeSet<Utxo>>,
+    pub finalized_utxos: BTreeMap<Account, BTreeSet<Utxo>>,
 
     /// Process one timer event at a time.
     #[serde(skip)]
@@ -429,7 +439,7 @@ pub enum ReimbursementReason {
     CallFailed,
 }
 
-impl CkBtcMinterState {
+impl MinterState {
     pub fn reinit(
         &mut self,
         InitArgs {
@@ -521,7 +531,7 @@ impl CkBtcMinterState {
         for utxo in self.available_utxos.iter() {
             ensure!(
                 self.outpoint_account.contains_key(&utxo.outpoint),
-                "the output_account map is missing an entry for {:?}",
+                "the outpoint_account map is missing an entry for {:?}",
                 utxo.outpoint
             );
 
@@ -530,6 +540,22 @@ impl CkBtcMinterState {
                     .iter()
                     .any(|(_, utxos)| utxos.contains(utxo)),
                 "available utxo {:?} does not belong to any account",
+                utxo
+            );
+        }
+
+        for utxo in self.available_sats_utxos.iter() {
+            ensure!(
+                self.outpoint_account.contains_key(&utxo.outpoint),
+                "the outpoint_account map is missing an entry for sats utxo with outpoint: {:?}",
+                utxo.outpoint
+            );
+
+            ensure!(
+                self.utxos_state_addresses
+                    .iter()
+                    .any(|(_, utxos)| utxos.contains(utxo)),
+                "available runes utxo {:?} does not belong to any account",
                 utxo
             );
         }
@@ -602,7 +628,7 @@ impl CkBtcMinterState {
     }
 
     // public for only for tests
-    pub(crate) fn add_utxos(&mut self, account: Account, utxos: Vec<Utxo>) {
+    pub(crate) fn add_utxos(&mut self, is_runes: bool, account: Account, utxos: Vec<Utxo>) {
         if utxos.is_empty() {
             return;
         }
@@ -613,7 +639,13 @@ impl CkBtcMinterState {
 
         for utxo in utxos {
             self.outpoint_account.insert(utxo.outpoint.clone(), account);
-            self.available_utxos.insert(utxo.clone());
+
+            if is_runes {
+                self.available_utxos.insert(utxo.clone());
+            } else {
+                self.available_sats_utxos.insert(utxo.clone());
+            }
+            
             self.checked_utxos.remove(&utxo);
             account_bucket.insert(utxo);
         }
@@ -684,6 +716,13 @@ impl CkBtcMinterState {
         if let Some(txid) = self.submitted_transactions.iter().find_map(|tx| {
             (tx.requests.iter().any(|r| r.block_index == block_index)).then_some(tx.txid)
         }) {
+            let txid_bytes = txid.as_ref().iter().rev().map(|n| *n as u8).collect::<Vec<u8>>();
+            let txid_hex = hex::encode(txid_bytes);
+            ic_cdk::println!(
+                "submitted tx id ({:?})",
+                txid_hex
+            );
+
             return RetrieveBtcStatus::Submitted { txid };
         }
 
@@ -695,6 +734,12 @@ impl CkBtcMinterState {
         {
             Some(FinalizedStatus::AmountTooLow) => return RetrieveBtcStatus::AmountTooLow,
             Some(FinalizedStatus::Confirmed { txid }) => {
+                let txid_bytes = txid.as_ref().iter().rev().map(|n| *n as u8).collect::<Vec<u8>>();
+                let txid_hex = hex::encode(txid_bytes);
+                ic_cdk::println!(
+                    "confirmed tx id ({:?})",
+                    txid_hex
+                );
                 return RetrieveBtcStatus::Confirmed { txid }
             }
             None => (),
@@ -759,8 +804,7 @@ impl CkBtcMinterState {
                 .sum::<usize>()
     }
 
-    /// Returns true if there is a pending retrieve_btc request with the given
-    /// identifier.
+    /// Returns true if there is a pending retrieve_btc request with the given identifier.
     fn has_pending_request(&self, block_index: u64) -> bool {
         self.pending_retrieve_btc_requests
             .iter()
@@ -769,9 +813,9 @@ impl CkBtcMinterState {
 
     fn forget_utxo(&mut self, utxo: &Utxo) {
         if let Some(account) = self.outpoint_account.remove(&utxo.outpoint) {
-            if self.update_balance_principals.contains(&account.owner) {
+            if self.update_balance_accounts.contains(&account) {
                 self.finalized_utxos
-                    .entry(account.owner)
+                    .entry(account)
                     .or_default()
                     .insert(utxo.clone());
             }
@@ -809,7 +853,7 @@ impl CkBtcMinterState {
             ));
         };
 
-        for utxo in finalized_tx.used_utxos.iter() {
+        for utxo in finalized_tx.used_runes_utxos.iter() {
             self.forget_utxo(utxo);
         }
         self.finalized_requests_count += finalized_tx.requests.len() as u64;
@@ -1005,7 +1049,7 @@ impl CkBtcMinterState {
     /// Filters out known UTXOs of the given account from the given UTXO list.
     pub fn new_utxos_for_account(&self, mut utxos: Vec<Utxo>, account: &Account) -> Vec<Utxo> {
         let maybe_existing_utxos = self.utxos_state_addresses.get(account);
-        let maybe_finalized_utxos = self.finalized_utxos.get(&account.owner);
+        let maybe_finalized_utxos = self.finalized_utxos.get(&account);
         utxos.retain(|utxo| {
             !maybe_existing_utxos
                 .map(|utxos| utxos.contains(utxo))
@@ -1229,20 +1273,19 @@ fn as_sorted_vec<T, K: Ord>(values: impl Iterator<Item = T>, key: impl Fn(&T) ->
     v
 }
 
-impl From<InitArgs> for CkBtcMinterState {
+impl From<InitArgs> for MinterState {
     fn from(args: InitArgs) -> Self {
         Self {
             btc_network: args.btc_network.into(),
             dao_addr: vec![],
-            sdbs: Default::default(),
             ecdsa_key_name: args.ecdsa_key_name,
             ecdsa_public_key: None,
             min_confirmations: args
                 .min_confirmations
                 .unwrap_or(crate::lifecycle::init::DEFAULT_MIN_CONFIRMATIONS),
             max_time_in_queue_nanos: args.max_time_in_queue_nanos,
-            update_balance_principals: Default::default(),
-            retrieve_btc_principals: Default::default(),
+            update_balance_accounts: Default::default(),
+            retrieve_btc_accounts: Default::default(),
             retrieve_btc_min_amount: args.retrieve_btc_min_amount,
             pending_retrieve_btc_requests: Default::default(),
             requests_in_flight: Default::default(),
@@ -1262,6 +1305,7 @@ impl From<InitArgs> for CkBtcMinterState {
             siwb_id: args.siwb_id,
             kyt_principal: args.kyt_principal,
             available_utxos: Default::default(),
+            available_sats_utxos: Default::default(),
             outpoint_account: Default::default(),
             utxos_state_addresses: Default::default(),
             finalized_utxos: Default::default(),
@@ -1288,7 +1332,7 @@ impl From<InitArgs> for CkBtcMinterState {
 /// Panics if there is no state.
 pub fn take_state<F, R>(f: F) -> R
 where
-    F: FnOnce(CkBtcMinterState) -> R,
+    F: FnOnce(MinterState) -> R,
 {
     __STATE.with(|s| f(s.take().expect("State not initialized!")))
 }
@@ -1298,7 +1342,7 @@ where
 /// Panics if there is no state.
 pub fn mutate_state<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut CkBtcMinterState) -> R,
+    F: FnOnce(&mut MinterState) -> R,
 {
     __STATE.with(|s| f(s.borrow_mut().as_mut().expect("State not initialized!")))
 }
@@ -1308,13 +1352,13 @@ where
 /// Panics if there is no state.
 pub fn read_state<F, R>(f: F) -> R
 where
-    F: FnOnce(&CkBtcMinterState) -> R,
+    F: FnOnce(&MinterState) -> R,
 {
     __STATE.with(|s| f(s.borrow().as_ref().expect("State not initialized!")))
 }
 
 /// Replaces the current state.
-pub fn replace_state(state: CkBtcMinterState) {
+pub fn replace_state(state: MinterState) {
     __STATE.with(|s| {
         *s.borrow_mut() = Some(state);
     });

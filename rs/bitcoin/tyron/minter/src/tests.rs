@@ -932,7 +932,7 @@ proptest! {
         state.push_submitted_transaction(SubmittedBtcTransaction {
             requests: requests.clone(),
             txid: txids[0],
-            used_utxos: used_utxos.clone(),
+            used_runes_utxos: used_utxos.clone(),
             submitted_at,
             change_output: Some(change_output),
             fee_per_vbyte: Some(fee_per_vbyte),
@@ -956,7 +956,7 @@ proptest! {
             state.replace_transaction(prev_txid, SubmittedBtcTransaction {
                 requests: requests.clone(),
                 txid: new_txid,
-                used_utxos: used_utxos.clone(),
+                used_runes_utxos: used_utxos.clone(),
                 submitted_at,
                 change_output: Some(change_output),
                 fee_per_vbyte: Some(fee_per_vbyte),

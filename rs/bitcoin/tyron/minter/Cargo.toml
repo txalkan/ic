@@ -46,10 +46,11 @@ serde = { workspace = true }
 serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 ic-xrc-types = "1.0.0"
+ordinals = { git = "https://github.com/ordinals/ord", tag = "0.17.1" }
 
 [dev-dependencies]
 assert_matches = "1.5.0"
-bitcoin = "0.28.1"
+bitcoin = "0.30.2"
 candid_parser = { workspace = true }
 canister-test = { path = "../../../rust_canisters/canister_test" }
 ic-config = { path = "../../../config" }

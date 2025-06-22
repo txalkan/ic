@@ -1,3 +1,4 @@
+// @review (alpha)
 use crate::address;
 use crate::state;
 use crate::tx::DisplayAmount;
@@ -347,10 +348,10 @@ pub fn build_submitted_transactions() -> String {
     with_utf8_buffer(|buf| {
         state::read_state(|s| {
             for tx in s.submitted_transactions.iter() {
-                for (i, utxo) in tx.used_utxos.iter().enumerate() {
+                for (i, utxo) in tx.used_runes_utxos.iter().enumerate() {
                     write!(buf, "<tr>").unwrap();
                     if i == 0 {
-                        let rowspan = tx.used_utxos.len();
+                        let rowspan = tx.used_runes_utxos.len();
                         write!(
                             buf,
                             "<td rowspan='{}'>{}</td>",
@@ -530,7 +531,7 @@ pub fn build_unconfirmed_change() -> String {
 pub fn build_update_balance_principals() -> String {
     with_utf8_buffer(|buf| {
         state::read_state(|s| {
-            for p in &s.update_balance_principals {
+            for p in &s.update_balance_accounts {
                 writeln!(buf, "<li>{}</li>", p).unwrap();
             }
         })
@@ -553,7 +554,7 @@ fn get_total_btc_managed() -> u64 {
 pub fn build_retrieve_btc_principals() -> String {
     with_utf8_buffer(|buf| {
         state::read_state(|s| {
-            for p in &s.retrieve_btc_principals {
+            for p in &s.retrieve_btc_accounts {
                 writeln!(buf, "<li>{}</li>", p).unwrap();
             }
         })
