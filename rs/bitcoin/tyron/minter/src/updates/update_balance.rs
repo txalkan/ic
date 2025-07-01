@@ -10,9 +10,10 @@ use ic_canister_log::log;
 use ic_ckbtc_kyt::Error as KytError;
 use ic_xrc_types::ExchangeRateError;
 use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
-use icrc_ledger_types::icrc1::account::{Account, Subaccount};
-use icrc_ledger_types::icrc1::transfer::Memo;
-use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use icrc_ledger_types::icrc1::{
+    account::{Account, Subaccount},
+    transfer::{Memo, TransferArg, TransferError}
+};
 use num_traits::ToPrimitive;
 use serde::Serialize;
 use super::get_btc_address::{GetBoxAddressArgs, SyronOperation};
@@ -1074,12 +1075,12 @@ pub async fn get_collateralized_account(ssi: &str) -> Result<CollateralizedAccou
     })
 }
 
-pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, susd: u64, btc: Option<u64>) -> Result<Vec<u64>, UpdateBalanceError> {
-    // SUSD amount cannot be lower than 20 cents @governance
-    if susd < 20_000_000 {
+pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, amt: u64, btc: Option<u64>) -> Result<Vec<u64>, UpdateBalanceError> {
+    // @dev Syron amount cannot be lower than 20 cents @governance
+    if amt < 20_000_000 {
         return Err(UpdateBalanceError::GenericError{
-            error_code: 6001,
-            error_message: format!("SUSD amount ({}) is below the minimum", susd),
+            error_code: 61,
+            error_message: format!("Syron amount ({}) is below the minimum", amt),
         });
     }
 
@@ -1104,7 +1105,7 @@ pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, sus
 
             let xr = fetch_btc_exchange_rate("USD".to_string()).await??;
             let exchange_rate: u64 = xr.rate / 1_000_000_000;
-            let bitcoin_amount = (susd as f64 / exchange_rate as f64) as u64;
+            let bitcoin_amount = (amt as f64 / exchange_rate as f64) as u64;
             
             // "bitcoin_amount" must be at least the minimum BTC amount requested by the user ("btc")
             if bitcoin_amount < btc {
@@ -1173,20 +1174,66 @@ pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, sus
         fee: None,
         created_at_time: None,
         memo: None,
-        amount: Nat::from(susd),
+        amount: Nat::from(amt),
     })
     .await
     .map_err(|(code, msg)| {
         UpdateBalanceError::GenericError{
             error_code: code as u64,
             error_message: format!(
-            "Could not update Syron SUSD transfer balance: {}",
+            "Could not update the Syron transfer balance: {}",
             msg)
         }
     })??;
     
     res.push(block_index_susd.0.to_u64().expect("Nat does not fit into u64"));
-    ic_cdk::println!("The user has sent {:?} susd-sats", susd);
+    ic_cdk::println!("The user has sent {:?} susd-sats", amt);
+    
+    Ok(res)
+}
+
+pub async fn syron_payment_icp(sender: BitcoinAddress, receiver: Account, amt: u64) -> Result<Vec<u64>, UpdateBalanceError> {
+    // @dev Syron amount cannot be lower than 20 cents @governance
+    if amt < 20_000_000 {
+        return Err(UpdateBalanceError::GenericError{
+            error_code: 61,
+            error_message: format!("Syron amount ({}) is below the minimum", amt),
+        });
+    }
+
+    let network = read_state(|s| (s.btc_network));
+    let ssi = &sender.display(network);
+    
+    let principal = get_siwb_principal(ssi).await?;
+    ic_cdk::println!("SIWB Internet Identity: {:?}", principal);
+    
+    let from_subaccount = Some(compute_subaccount(2, ssi));
+
+    let syron_client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
+    };
+    let block_index_susd = syron_client
+    .transfer(TransferArg {
+        from_subaccount,
+        to: receiver,
+        fee: None,
+        created_at_time: None,
+        memo: None,
+        amount: Nat::from(amt),
+    })
+    .await
+    .map_err(|(code, msg)| {
+        UpdateBalanceError::GenericError{
+            error_code: code as u64,
+            error_message: format!(
+            "Could not update the Syron transfer balance: {}",
+            msg)
+        }
+    })??;
+    
+    let res = vec![block_index_susd.0.to_u64().expect("Nat does not fit into u64")];
+    ic_cdk::println!("The user has sent {:?} syron-sats to account: {:?}", amt, receiver);
     
     Ok(res)
 }
