@@ -594,33 +594,38 @@ pub async fn update_ssi_balance(
 pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<UtxoStatus>, UpdateBalanceError> {
     // @dev get minter runes address
     let dao_addr = state::read_state(|s| s.dao_addr.clone());
-    let minter_address = &dao_addr[2];
+    
+    // @note the ssi address for the runes minter is the treasury address (nonce 1)
+    let treasury_address = &dao_addr[1];
 
     let (btc_network, min_confirmations) =
         state::read_state(|s| (s.btc_network, s.min_confirmations));
         
-    let minter = minter_address.display(btc_network); 
-    let subaccount = compute_subaccount(0, &minter);
-    let account = Account {
+    let treasury_addr = treasury_address.display(btc_network); 
+    let runes_minter_subaccount = compute_subaccount(1, &treasury_addr);
+    let runes_minter_account = Account {
         owner: ic_cdk::id(),
-        subaccount: Some(subaccount)
+        subaccount: Some(runes_minter_subaccount)
     };
-    state::read_state(|s| s.mode.is_deposit_available_for(&account))
+    state::read_state(|s| s.mode.is_deposit_available_for(&runes_minter_account))
         .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
 
-    let _guard = balance_update_guard(account.clone())?;
+    let _guard = balance_update_guard(runes_minter_account.clone())?;
 
     let mut utxo_statuses: Vec<UtxoStatus> = vec![];
 
-    let new_sats_utxos = state::read_state(|s| s.new_utxos_for_account(utxos.0, &account));
-    let new_runes_utxos = state::read_state(|s| s.new_utxos_for_account(utxos.1, &account));
+    let new_sats_utxos = state::read_state(|s| s.new_utxos_for_account(utxos.0, &runes_minter_account));
+    let new_runes_utxos = state::read_state(|s| s.new_utxos_for_account(utxos.1, &runes_minter_account));
     let mut total_utxos = new_sats_utxos.clone();
     total_utxos.extend(new_runes_utxos.clone());
 
     // Remove pending finalized transactions for the account
-    state::mutate_state(|s| s.finalized_utxos.remove(&account));
+    state::mutate_state(|s| s.finalized_utxos.remove(&runes_minter_account));
 
     let btc_deposit = total_utxos.iter().map(|u| u.value).sum::<u64>();
+
+    // @dev the runes minter address (nonce 2)
+    let runes_minter_addr = &dao_addr[2].display(btc_network);
 
     if btc_deposit == 0 {
         // We bail out early if there are no UTXOs to avoid creating a new entry
@@ -636,7 +641,7 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
             ..
         } = get_utxos(
             btc_network,
-            &minter,
+            &runes_minter_addr,
             min_confirmations,
             CallSource::Client,
         )
@@ -668,19 +673,18 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
         });
     }
 
-    // @dev use box subaccount for gas and runes subaccount for stablecoin
-    let box_subaccount = compute_subaccount(1, &minter);
-    let box_account = Account {
+    // @dev use box subaccount for gas and runes subaccount for stablecoin balances of the runes minter
+    let box_subaccount = compute_subaccount(1, &runes_minter_addr);
+    let box_ledger_account = Account {
         owner: ic_cdk::id(),
         subaccount: Some(box_subaccount)
     };
 
-    let runes_subaccount = compute_subaccount(4, &minter);
-    let runes_account = Account {
+    let runes_subaccount = compute_subaccount(4, &runes_minter_addr);
+    let runes_ledger_account = Account {
         owner: ic_cdk::id(),
         subaccount: Some(runes_subaccount)
     };
-
 
     for utxo in new_sats_utxos {
         let memo = MintMemo::Convert {
@@ -689,14 +693,14 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
             kyt_fee: None,
         };
 
-        match count_runes_minter(utxo.value, box_account, crate::memo::encode(&memo).into()).await {
+        match count_runes_minter(utxo.value, box_ledger_account, crate::memo::encode(&memo).into()).await {
             Ok(block_index) => {
                 state::mutate_state(|s| {
                     state::audit::add_utxos(
                         false,
                         s,
                         Some(block_index),
-                        account,
+                        runes_minter_account,
                         vec![utxo.clone()],
                     )
                 });
@@ -722,14 +726,14 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
             kyt_fee: None,
         };
 
-        match count_runes_minter(utxo.value, runes_account, crate::memo::encode(&memo).into()).await {
+        match count_runes_minter(utxo.value, runes_ledger_account, crate::memo::encode(&memo).into()).await {
             Ok(block_index) => {
                 state::mutate_state(|s| {
                     state::audit::add_utxos(
                         true,
                         s,
                         Some(block_index),
-                        account,
+                        runes_minter_account,
                         vec![utxo.clone()],
                     )
                 });
