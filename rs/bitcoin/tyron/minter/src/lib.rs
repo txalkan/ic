@@ -1455,17 +1455,32 @@ pub fn timer() {
                     //ic_cdk::println!("[ProcessLogic]: Task finished, rescheduling for 5 seconds later.");
                 });
 
-                // @dev update runes minter balance
-                // @to-do read cycles cost from state
-                match check_runes_minter_utxos().await {
-                    Ok(runes_minter_utxos) => {
-                        let res = update_runes_balance(runes_minter_utxos).await;
-                        ic_cdk::println!("[ProcessLogic]: Updated runes minter balance: {:?}", res);
+                // @dev update runes minter balance                
+                // @dev only outcall to check for runes if there are new UTXOs to process
+                match runes::is_new_runes_minter_utxos().await {
+                    Ok(new_utxos) => {
+                        if !new_utxos.is_empty() {
+                            match check_runes_minter_utxos().await {
+                                Ok(runes_minter_utxos) => {
+                                    if !runes_minter_utxos.0.is_empty() || !runes_minter_utxos.1.is_empty() {
+                                        let res = update_runes_balance(runes_minter_utxos).await;
+                                        ic_cdk::println!("[ProcessLogic]: Updated runes minter balance: {:?}", res);
+                                    } else {
+                                        ic_cdk::println!("[ProcessLogic]: No new runes minter utxos to update.");
+                                    }
+                                },
+                                Err(err) => {
+                                    ic_cdk::println!("[ProcessLogic]: Failed to check runes minter utxos: {:?}", err);
+                                }
+                            };
+                        } else {
+                            ic_cdk::println!("[ProcessLogic]: No new UTXOs to check for runes minter balance.");
+                        }
                     },
                     Err(err) => {
-                        ic_cdk::println!("[ProcessLogic]: Failed to check runes minter utxos: {:?}", err);
+                        ic_cdk::println!("[ProcessLogic]: Failed to check for new runes minter UTXOs: {:?}", err);
                     }
-                };
+                }
               
                 //ic_cdk::println!("[ProcessLogic]: --> Calling submit_pending_requests()...");
                 submit_pending_requests().await;

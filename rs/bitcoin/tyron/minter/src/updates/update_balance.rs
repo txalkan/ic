@@ -622,6 +622,7 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
     // Remove pending finalized transactions for the account
     state::mutate_state(|s| s.finalized_utxos.remove(&runes_minter_account));
 
+    // @dev add new sats to runes minter balance
     let btc_deposit = total_utxos.iter().map(|u| u.value).sum::<u64>();
 
     // @dev the runes minter address (nonce 2)
