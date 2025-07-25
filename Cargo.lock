@@ -6017,6 +6017,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "simple_asn1",
+ "thiserror",
 ]
 
 [[package]]

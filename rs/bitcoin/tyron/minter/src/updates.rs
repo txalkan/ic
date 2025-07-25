@@ -7,3 +7,4 @@ pub use get_btc_address::get_btc_address;
 pub use get_withdrawal_account::get_withdrawal_account;
 pub use retrieve_btc::retrieve_btc;
 pub use update_balance::update_ssi_balance;
+pub use update_balance::UpdateBalanceError;

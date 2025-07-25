@@ -2,10 +2,12 @@ use crate::address::BitcoinAddress;
 use crate::logs::{P0, P1};
 use crate::memo::Status;
 use crate::queries::WithdrawalFee;
+use crate::runes::check_runes_minter_utxos;
 use crate::state::ReimbursementReason;
 use crate::tasks::schedule_after;
 use crate::tx::TxOut;
 use crate::updates::get_withdrawal_account::compute_subaccount;
+use crate::updates::update_balance::update_runes_balance;
 use candid::{CandidType, Deserialize};
 use ic_btc_interface::{MillisatoshiPerByte, Network, OutPoint, Satoshi, Txid, Utxo};
 use ic_canister_log::log;
@@ -36,6 +38,8 @@ pub mod storage;
 pub mod tasks;
 pub mod tx;
 pub mod updates;
+pub mod runes;
+pub mod https;
 
 #[cfg(test)]
 mod tests;
@@ -1451,6 +1455,18 @@ pub fn timer() {
                     //ic_cdk::println!("[ProcessLogic]: Task finished, rescheduling for 5 seconds later.");
                 });
 
+                // @dev update runes minter balance
+                // @to-do read cycles cost from state
+                match check_runes_minter_utxos().await {
+                    Ok(runes_minter_utxos) => {
+                        let res = update_runes_balance(runes_minter_utxos).await;
+                        ic_cdk::println!("[ProcessLogic]: Updated runes minter balance: {:?}", res);
+                    },
+                    Err(err) => {
+                        ic_cdk::println!("[ProcessLogic]: Failed to check runes minter utxos: {:?}", err);
+                    }
+                };
+              
                 //ic_cdk::println!("[ProcessLogic]: --> Calling submit_pending_requests()...");
                 submit_pending_requests().await;
                 //ic_cdk::println!("[ProcessLogic]: <-- Finished submit_pending_requests().");
