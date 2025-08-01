@@ -128,6 +128,18 @@ pub fn encode_metrics(
         "Total number of UTXOs the minter can use for retrieve_btc requests.",
     )?;
 
+    metrics.encode_gauge(
+        "ckbtc_minter_sats_utxos_available",
+        state::read_state(|s| s.available_sats_utxos.len()) as f64,
+        "Total number of sats UTXOs the minter can use for gas and output values.",
+    )?;
+
+    metrics.encode_gauge(
+        "ckbtc_minter_ssi_utxos_available",
+        state::read_state(|s| s.available_ssi_utxos.len()) as f64,
+        "Total number of SSI UTXOs available for gas and collateral operations.",
+    )?;
+
     metrics
         .counter_vec(
             "ckbtc_minter_get_utxos_calls",
@@ -143,9 +155,28 @@ pub fn encode_metrics(
         )?;
 
     metrics.encode_gauge(
-        "ckbtc_minter_btc_balance",
+        "minter_btc_balance",
         state::read_state(|s| {
-            s.available_utxos.iter().map(|u| u.value).sum::<u64>()
+            s.available_sats_utxos.iter().map(|u| u.value).sum::<u64>()
+                + s.available_ssi_utxos.iter().map(|u| u.value).sum::<u64>()
+                + s.submitted_transactions//@review (alpha)
+                    .iter()
+                    .map(|tx| {
+                        tx.change_output
+                            .as_ref()
+                            .map(|out| out.value)
+                            .unwrap_or_default()
+                    })
+                    .sum::<u64>()
+        }) as f64,
+        "Total BTC amount in TyronDAO UTXOs.",
+    )?;
+
+    metrics.encode_gauge(
+        "minter_runes_balance",
+        state::read_state(|s| {
+            s.available_sats_utxos.iter().map(|u| u.value).sum::<u64>()
+                + s.available_ssi_utxos.iter().map(|u| u.value).sum::<u64>()
                 + s.submitted_transactions
                     .iter()
                     .map(|tx| {
@@ -156,7 +187,7 @@ pub fn encode_metrics(
                     })
                     .sum::<u64>()
         }) as f64,
-        "Total BTC amount locked in available UTXOs.",
+        "Total Runes amount in Minter UTXOs.",
     )?;
 
     metrics.encode_gauge(

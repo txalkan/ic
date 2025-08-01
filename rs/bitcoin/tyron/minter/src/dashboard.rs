@@ -429,6 +429,8 @@ pub fn build_finalized_requests() -> String {
 pub fn build_available_utxos() -> String {
     with_utf8_buffer(|buf| {
         state::read_state(|s| {
+            // Minter runes UTXOs
+            writeln!(buf, "<tr><td colspan='4'><b>Minter Runes UTXOs</b></td></tr>").unwrap();
             for utxo in &s.available_utxos {
                 writeln!(
                     buf,
@@ -447,8 +449,68 @@ pub fn build_available_utxos() -> String {
             }
             writeln!(
                 buf,
-                "<tr><td colspan='3' style='text-align: right;'><b>Total available</b></td><td>{}</td></tr>",
+                "<tr><td colspan='3' style='text-align: right;'><b>Total Minter Runes</b></td><td>{}</td></tr>",
                 DisplayAmount(s.available_utxos.iter().map(|u| u.value).sum::<u64>())
+            )
+            .unwrap();
+
+            // Minter sats UTXOs
+            writeln!(buf, "<tr><td colspan='4'><b>Minter Sats UTXOs</b></td></tr>").unwrap();
+            for utxo in &s.available_sats_utxos {
+                writeln!(
+                    buf,
+                    "<tr>
+                        <td>{}</td>
+                        <td>{}</td>
+                        <td>{}</td>
+                        <td>{}</td>
+                    </tr>",
+                    txid_link(&utxo.outpoint.txid),
+                    utxo.outpoint.vout,
+                    utxo.height,
+                    DisplayAmount(utxo.value),
+                )
+                .unwrap()
+            }
+            writeln!(
+                buf,
+                "<tr><td colspan='3' style='text-align: right;'><b>Total Minter Sats</b></td><td>{}</td></tr>",
+                DisplayAmount(s.available_sats_utxos.iter().map(|u| u.value).sum::<u64>())
+            )
+            .unwrap();
+
+            // SSI collateral UTXOs
+            writeln!(buf, "<tr><td colspan='4'><b>SSI UTXOs (Collateral)</b></td></tr>").unwrap();
+            for utxo in &s.available_ssi_utxos {
+                writeln!(
+                    buf,
+                    "<tr>
+                        <td>{}</td>
+                        <td>{}</td>
+                        <td>{}</td>
+                        <td>{}</td>
+                    </tr>",
+                    txid_link(&utxo.outpoint.txid),
+                    utxo.outpoint.vout,
+                    utxo.height,
+                    DisplayAmount(utxo.value),
+                )
+                .unwrap()
+            }
+            writeln!(
+                buf,
+                "<tr><td colspan='3' style='text-align: right;'><b>Total SSI (Collateral)</b></td><td>{}</td></tr>",
+                DisplayAmount(s.available_ssi_utxos.iter().map(|u| u.value).sum::<u64>())
+            )
+            .unwrap();
+            
+            // Grand total
+            let total = s.available_sats_utxos.iter().map(|u| u.value).sum::<u64>() +
+                       s.available_ssi_utxos.iter().map(|u| u.value).sum::<u64>();
+            writeln!(
+                buf,
+                "<tr><td colspan='3' style='text-align: right;'><b>Grand Total BTC Available</b></td><td>{}</td></tr>",
+                DisplayAmount(total)
             )
             .unwrap();
         })
@@ -546,7 +608,9 @@ fn get_total_btc_managed() -> u64 {
                 total_btc += change_output.value;
             }
         }
-        total_btc += s.available_utxos.iter().map(|u| u.value).sum::<u64>();
+        // total_btc += s.available_utxos.iter().map(|u| u.value).sum::<u64>(); runes must be accounted separately
+        total_btc += s.available_sats_utxos.iter().map(|u| u.value).sum::<u64>();
+        total_btc += s.available_ssi_utxos.iter().map(|u| u.value).sum::<u64>();
         total_btc
     })
 }

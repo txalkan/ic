@@ -42,6 +42,8 @@ pub enum Event {
         to_account: Account,
         #[serde(rename = "utxos")]
         utxos: Vec<Utxo>,
+        #[serde(rename = "ssi_address")]
+        ssi_address: Option<String>,
     },
 
     /// Indicates that the minter accepted a new retrieve_btc request.
@@ -211,8 +213,8 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<MinterState, Re
             }
             Event::Upgrade(args) => state.upgrade(args),
             Event::ReceivedUtxos {
-                is_runes, to_account, utxos, ..
-            } => state.add_utxos(is_runes, to_account, utxos),
+                is_runes, to_account, utxos, ssi_address, ..
+            } => state.add_utxos(is_runes, to_account, utxos, ssi_address),
             Event::AcceptedRetrieveBtcRequest(req) => {
                 if let Some(account) = req.reimbursement_account {
                     state

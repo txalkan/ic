@@ -64,6 +64,7 @@ pub enum UtxoStatus {
 pub enum ErrorCode {
     ConfigurationError = 1,
     UnsupportedOperation = 2,
+    InsufficientAmount = 3
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -95,6 +96,10 @@ pub enum UpdateBalanceError {
         error_message: String,
     },
     CallError {
+        method: String,
+        reason: String
+    },
+    SystemError {
         method: String,
         reason: String
     },
@@ -348,7 +353,8 @@ pub async fn update_ssi_balance(
     state::read_state(|s| s.mode.is_deposit_available_for(&ssi_account))
         .map_err(UpdateBalanceError::TemporarilyUnavailable)?;
 
-    let _guard = balance_update_guard(ssi_account.clone())?;
+    // @review (guard) the guard was moved to the upstream function
+    // let _guard = balance_update_guard(ssi_account.clone())?;
 
     let ssi_box_subaccount = compute_subaccount(1, &args.ssi);
     
@@ -437,28 +443,22 @@ pub async fn update_ssi_balance(
             };
 
             let kyt_fee = read_state(|s| s.kyt_fee);
-        
+            let min_deposit = read_state(|s| s.min_btc_deposit);
+
             for utxo in new_utxos {
-                if utxo.value <= kyt_fee {
+                if utxo.value < min_deposit {
                     mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
                     log!(
                         P1,
-                        "Ignored UTXO {} for account {ssi_box_account} because UTXO value {} is lower than the KYT fee {}",
+                        "Ignored UTXO {} for account {ssi_box_account} because UTXO value {} is lower than the minimum deposit amount {}",
                         DisplayOutpoint(&utxo.outpoint),
                         DisplayAmount(utxo.value),
-                        DisplayAmount(kyt_fee),
+                        DisplayAmount(min_deposit),
                     );
                     utxo_statuses.push(UtxoStatus::ValueTooSmall(utxo));
                     continue;
                 }
-        
-                // @review (governance) dust limit
-                if utxo.value < 600 {
-                    mutate_state(|s| crate::state::audit::ignore_utxo(s, utxo.clone()));
-                    utxo_statuses.push(UtxoStatus::TransferInscription(utxo));
-                    continue;
-                }
-        
+                
                 // @review (kyt)
                 // let (uuid, status, kyt_provider) = kyt_check_utxo(caller_account.owner, &utxo).await?;
                 // mutate_state(|s| {
@@ -483,6 +483,18 @@ pub async fn update_ssi_balance(
                             DisplayOutpoint(&utxo.outpoint),
                             DisplayAmount(utxo.value),
                         );
+
+                        // @dev save UTXO to state to prevent double spending
+                        state::mutate_state(|s| {
+                            state::audit::add_utxos(
+                                false,
+                                s,
+                                Some(block_index[0]),
+                                ssi_box_account,
+                                vec![utxo.clone()],
+                                Some(args.ssi.clone()),
+                            )
+                        });
                         utxo_statuses.push(UtxoStatus::Minted {
                             block_index: block_index[0],
                             utxo,
@@ -517,15 +529,15 @@ pub async fn update_ssi_balance(
             let btc_1 = balance_of(SyronLedger::BTC, &args.ssi, 1).await.unwrap_or(0);
             let susd_1 = balance_of(SyronLedger::SYRON, &args.ssi, 1).await.unwrap_or(0);
     
-            // @dev Throw an error if any of the balances is zero
-            if btc_1 == 0 || susd_1 == 0 {
+            // @dev Throw an error if the bitcoin collateral balance is zero
+            if btc_1 == 0 {
                 return Err(UpdateBalanceError::GenericError {
                     error_code: ErrorCode::UnsupportedOperation as u64,
-                    error_message: "Invalid balance to redeem BTC".to_string()
+                    error_message: "@update_ssi_balance: Invalid balance to redeem BTC".to_string()
                 });
             }
 
-            // Syron BTC Ledger
+            // Syron bitcoin ledger
             let sbtc_client = ICRC1Client {
                 runtime: CdkRuntime,
                 ledger_canister_id: state::read_state(|s| s.ledger_id.get().into()),
@@ -542,47 +554,60 @@ pub async fn update_ssi_balance(
                 .await
                 .map_err(|(code, msg)| {
                     UpdateBalanceError::TemporarilyUnavailable(format!(
-                        "cannot mint ckbtc: {} (reject_code = {})",
+                        "update_ssi_balance: Cannot redeem bitcoin: {} (reject_code = {})",
                         msg, code
                     ))
                 })??;
         
-            // Syron SUSD Ledger
-            let susd_client = ICRC1Client {
-                runtime: CdkRuntime,
-                ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
-            };
+            // Syron stablecoin ledger
+            if susd_1 != 0 {
+                let susd_client = ICRC1Client {
+                    runtime: CdkRuntime,
+                    ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
+                };
 
-            susd_client
-            .transfer(TransferArg {
-                from_subaccount: Some(ssi_box_subaccount),
-                to: minter_account,
-                fee: None,
-                created_at_time: None,
-                memo: None,
-                amount: Nat::from(susd_1),
-            })
-            .await
-            .map_err(|(code, msg)| {
-                UpdateBalanceError::TemporarilyUnavailable(format!(
-                    "cannot grant SUSD loan: {} (reject_code = {})",
-                    msg, code
-                ))
-            })??;
+                susd_client
+                .transfer(TransferArg {
+                    from_subaccount: Some(ssi_box_subaccount),
+                    to: minter_account,
+                    fee: None,
+                    created_at_time: None,
+                    memo: None,
+                    amount: Nat::from(susd_1),
+                })
+                .await
+                .map_err(|(code, msg)| {
+                    UpdateBalanceError::TemporarilyUnavailable(format!(
+                        "update_ssi_balance: Cannot grant loan repayment: {} (reject_code = {})",
+                        msg, code
+                    ))
+                })??;
+            }
         },
         SyronOperation::Liquidation => {
             // invalid operation, throw error
             return Err(UpdateBalanceError::GenericError {  
                 error_code: ErrorCode::UnsupportedOperation as u64,
-                error_message: "Invalid operation".to_string()
+                error_message: "@update_ssi_balance: Invalid liquidation operation".to_string()
             });
         },
         SyronOperation::Payment => {
             // invalid operation, throw error
             return Err(UpdateBalanceError::GenericError {  
                 error_code: ErrorCode::UnsupportedOperation as u64,
-                error_message: "Invalid operation".to_string()
+                error_message: "@update_ssi_balance: Invalid payment operation".to_string()
             });
+        },
+        SyronOperation::DepositSyron => {
+            let current_runes_deposit = balance_of(SyronLedger::SYRON, &args.ssi, 5).await.unwrap_or(0);
+            // @dev throw error if zero
+            if current_runes_deposit == 0 {
+                return Err(UpdateBalanceError::GenericError {
+                    error_code: ErrorCode::InsufficientAmount as u64,
+                    error_message: "@update_ssi_balance: No runes deposit balance available".to_string()
+                });
+            }
+            let _index = syron_update(&args.ssi, 5, Some(2), current_runes_deposit).await?;
         }
     }
     schedule_now(TaskType::ProcessLogic);
@@ -623,7 +648,7 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
     state::mutate_state(|s| s.finalized_utxos.remove(&runes_minter_account));
 
     // @dev add new sats to runes minter balance
-    let btc_deposit = total_utxos.iter().map(|u| u.value).sum::<u64>();
+    let btc_deposit = new_sats_utxos.iter().map(|u| u.value).sum::<u64>();
 
     // @dev the runes minter address (nonce 2)
     let runes_minter_addr = &dao_addr[2].display(btc_network);
@@ -675,13 +700,7 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
     }
 
     // @dev use box subaccount for gas and runes subaccount for stablecoin balances of the runes minter
-    let box_subaccount = compute_subaccount(1, &runes_minter_addr);
-    let box_ledger_account = Account {
-        owner: ic_cdk::id(),
-        subaccount: Some(box_subaccount)
-    };
-
-    let runes_subaccount = compute_subaccount(4, &runes_minter_addr);
+    let runes_subaccount = compute_subaccount(4, &treasury_addr);
     let runes_ledger_account = Account {
         owner: ic_cdk::id(),
         subaccount: Some(runes_subaccount)
@@ -694,7 +713,7 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
             kyt_fee: None,
         };
 
-        match count_runes_minter(utxo.value, box_ledger_account, crate::memo::encode(&memo).into()).await {
+        match count_runes_minter(utxo.value, runes_minter_account, crate::memo::encode(&memo).into()).await {
             Ok(block_index) => {
                 state::mutate_state(|s| {
                     state::audit::add_utxos(
@@ -703,6 +722,7 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
                         Some(block_index),
                         runes_minter_account,
                         vec![utxo.clone()],
+                        None,
                     )
                 });
                 utxo_statuses.push(UtxoStatus::Read(utxo));
@@ -736,6 +756,7 @@ pub async fn update_runes_balance(utxos: (Vec<Utxo>, Vec<Utxo>)) -> Result<Vec<U
                         Some(block_index),
                         runes_minter_account,
                         vec![utxo.clone()],
+                        None,
                     )
                 });
                 utxo_statuses.push(UtxoStatus::Read(utxo));
@@ -776,12 +797,17 @@ async fn count_runes_minter(runes: u64, to: Account, memo: Memo) -> Result<u64, 
         .await
         .map_err(|(code, msg)| {
             UpdateBalanceError::TemporarilyUnavailable(format!(
-                "cannot add runes balance: {} (reject_code = {})",
+                "@count_runes_minter: Cannot add runes balance: {} (reject_code = {})",
                 msg, code
             ))
             })??;
 
-    Ok(block_index.0.to_u64().expect("nat does not fit into u64"))
+    let res = block_index.0.to_u64()
+        .ok_or_else(|| UpdateBalanceError::SystemError{
+            method: "count_runes_minter".to_string(),
+            reason: "Block index too large for u64".to_string()
+        })?;
+    Ok(res)
 }
 
 async fn _kyt_check_utxo(
@@ -887,13 +913,13 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
         .await
         .map_err(|(code, msg)| {
             UpdateBalanceError::TemporarilyUnavailable(format!(
-                "cannot register bitcoin collateral due to error ({} - reject_code = {})",
+                "@mint: Cannot register bitcoin collateral due to error ({} - reject_code = {})",
                 msg, code
             ))
         })??;
 
     let mut res: Vec<u64> = Vec::new();
-    res.push(block_index_btc1.0.to_u64().expect("nat does not fit into u64"));
+    res.push(block_index_btc1.0.to_u64().expect("@mint: Nat does not fit into u64"));
 
     if susd != 0 {
         // @dev SUSD
@@ -915,7 +941,7 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
             .await
             .map_err(|(code, msg)| {
                 UpdateBalanceError::TemporarilyUnavailable(format!(
-                    "cannot grant syron loan due to error ({} - reject_code = {})",
+                    "@mint: Cannot grant syron loan due to error ({} - reject_code = {})",
                     msg, code
                 ))
             })??;
@@ -932,7 +958,7 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
             .await
             .map_err(|(code, msg)| {
                 UpdateBalanceError::TemporarilyUnavailable(format!(
-                    "cannot update syron balance due to error ({} - reject_code = {})", // @review (alpha) if it fails, make sure that the fn fails entirely (revert previous updates in collateral and loan)
+                    "@mint: Cannot update syron balance due to error ({} - reject_code = {})", // @review (alpha) if it fails, make sure that the fn fails entirely (revert previous updates in collateral and loan)
                     msg, code
                 ))
             })??;
@@ -950,8 +976,8 @@ pub(crate) async fn mint(ssi: &str, satoshis: u64, to: Account, memo: Memo, acco
             DisplayAmount(exchange_rate),
         );
 
-        res.push(block_index_susd1.0.to_u64().expect("nat does not fit into u64"));
-        res.push(block_index_susd2.0.to_u64().expect("nat does not fit into u64"));
+        res.push(block_index_susd1.0.to_u64().expect("@mint: Nat does not fit into u64"));
+        res.push(block_index_susd2.0.to_u64().expect("@mint: Nat does not fit into u64"));
     }
 
     Ok(res)
@@ -992,12 +1018,94 @@ pub async fn syron_update(ssi: &str, from: u64, to: Option<u64>, amt: u64) -> Re
         UpdateBalanceError::GenericError{
             error_code: code as u64,
             error_message: format!(
-            "cannot update SUSD balance: {}",
+            "@syron_update: Cannot update syron balance to subaccount with nonce ({}) due to message: {}",
+            to.map(|t| t.to_string()).unwrap_or_else(|| "None".to_string()),
             msg)
         }
     })??;
     
-    let res = block_index_susd.0.to_u64().expect("nat does not fit into u64");
+    let res = block_index_susd.0.to_u64()
+        .ok_or_else(|| UpdateBalanceError::SystemError{
+            method: "syron_update".to_string(),
+            reason: "Block index too large for u64".to_string()
+        })?;
+    Ok(res)
+}
+
+// @dev add pending runes balance
+// explicitly revert if requested
+pub async fn syron_runes_deposit(ssi: &str, amt: u64, revert: bool) -> Result<u64, UpdateBalanceError> {
+    if amt == 0 {
+        return Err(UpdateBalanceError::CallError{
+            method: "syron_runes_deposit".to_string(),
+            reason: "Amount cannot be zero".to_string()
+        });
+    }
+    
+    // @dev use nonce 5 for runes pending deposits
+    let minter = ic_cdk::id(); 
+    let pending_subaccount = compute_subaccount(5, ssi);
+    let pending_account: Account = Account {
+        owner: minter,
+        subaccount: Some(pending_subaccount)
+    };
+
+    let susd_client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: state::read_state(|s| s.susd_id.get().into()),
+    };
+    let block_index_susd = match revert {
+        true => {
+            let minter_account: Account = Account{
+                owner: minter,
+                subaccount: None
+            };
+            susd_client
+            .transfer(TransferArg {
+                from_subaccount: Some(pending_subaccount),
+                to: minter_account,
+                fee: None,
+                created_at_time: None,
+                memo: None,
+                amount: Nat::from(amt),
+            })
+            .await
+            .map_err(|(code, msg)| {
+                UpdateBalanceError::GenericError{
+                    error_code: code as u64,
+                    error_message: format!(
+                    "@syron_runes_deposit: Could not revert syron runes deposit balance: {}",
+                    msg)
+                }
+            })?? 
+        }
+        false => {
+            susd_client
+            .transfer(TransferArg {
+                from_subaccount: None,
+                to: pending_account,
+                fee: None,
+                created_at_time: None,
+                memo: None,
+                amount: Nat::from(amt),
+            })
+            .await
+            .map_err(|(code, msg)| {
+                UpdateBalanceError::GenericError{
+                    error_code: code as u64,
+                    error_message: format!(
+                    "@syron_runes_deposit: Could not update syron runes deposit balance: {}",
+                    msg)
+                }
+            })??
+        }
+    };
+    
+    let res = block_index_susd.0.to_u64()
+        .ok_or_else(|| UpdateBalanceError::SystemError{
+            method: "syron_runes_deposit".to_string(),
+            reason: "Block index too large for u64".to_string()
+        })?;
     Ok(res)
 }
 
@@ -1041,7 +1149,13 @@ pub async fn btc_bal_update(ssi: &str, from: u64, to: Option<u64>, amt: u64) -> 
         }
     })??;
     
-    let res = [block_index_btc.0.to_u64().expect("nat does not fit into u64")];
+    let res = [
+        block_index_btc.0.to_u64()
+            .ok_or_else(|| UpdateBalanceError::SystemError{
+                method: "btc_bal_update".to_string(),
+                reason: "Block index too large for u64".to_string()
+            })?
+    ];
     Ok(res.to_vec())
 }
 
@@ -1084,8 +1198,8 @@ pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, amt
     // @dev Syron amount cannot be lower than 20 cents @governance
     if amt < 20_000_000 {
         return Err(UpdateBalanceError::GenericError{
-            error_code: 61,
-            error_message: format!("Syron amount ({}) is below the minimum", amt),
+            error_code: ErrorCode::InsufficientAmount as u64,
+            error_message: format!("@syron_payment: Syron amount ({}) is below the minimum", amt),
         });
     }
 
@@ -1094,7 +1208,7 @@ pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, amt
     let recipient = &receiver.display(network);
     
     let principal = get_siwb_principal(ssi).await?;
-    ic_cdk::println!("SIWB Internet Identity: {:?}", principal);
+    ic_cdk::println!("@syron_payment: SIWB Internet Identity = {:?}", principal);
     
     let mut res = vec![];
 
@@ -1103,8 +1217,8 @@ pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, amt
             // @dev BTC amount cannot be lower than 200 sats @governance
             if btc < 200 {
                 return Err(UpdateBalanceError::GenericError{
-                    error_code: 7001,
-                    error_message: format!("BTC amount ({}) is below the minimum", btc),
+                    error_code: ErrorCode::InsufficientAmount as u64,
+                    error_message: format!("@syron_payment: BTC amount ({}) is below the minimum", btc),
                 });
             }
 
@@ -1115,9 +1229,9 @@ pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, amt
             // "bitcoin_amount" must be at least the minimum BTC amount requested by the user ("btc")
             if bitcoin_amount < btc {
                 return Err(UpdateBalanceError::GenericError{
-                    error_code: 7002,
+                    error_code: ErrorCode::InsufficientAmount as u64,
                     error_message: format!(
-                        "Insufficient BTC amount. Computed amount: {} sats, Minimum Required: {} sats, Exchange Rate: {}",
+                        "@syron_payment: Insufficient BTC amount. Computed amount: {} sats, Minimum Required: {} sats, Exchange Rate: {}",
                         bitcoin_amount, btc, exchange_rate
                     )
                 });
@@ -1149,13 +1263,19 @@ pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, amt
                 UpdateBalanceError::GenericError{
                     error_code: code as u64,
                     error_message: format!(
-                    "Could not update BTC swap credit: {}",
+                    "@syron_payment: Could not update BTC swap credit: {}",
                     msg)
                 }
             })??;
         
-            res.push(block_index_btc.0.to_u64().expect("Nat does not fit into u64"));
-            ic_cdk::println!("The user has been credited {:?} satoshis", bitcoin_amount);
+            res.push(
+                block_index_btc.0.to_u64()
+                .ok_or_else(|| UpdateBalanceError::SystemError{
+                    method: "syron_payment".to_string(),
+                    reason: "Block index too large for u64".to_string()
+                })?
+            );
+            ic_cdk::println!("@syron_payment: The user has been credited {:?} satoshis", bitcoin_amount);
         },
         None => {}  
     } 
@@ -1186,13 +1306,19 @@ pub async fn syron_payment(sender: BitcoinAddress, receiver: BitcoinAddress, amt
         UpdateBalanceError::GenericError{
             error_code: code as u64,
             error_message: format!(
-            "Could not update the Syron transfer balance: {}",
+            "@syron_payment: Could not update the Syron transfer balance: {}",
             msg)
         }
     })??;
     
-    res.push(block_index_susd.0.to_u64().expect("Nat does not fit into u64"));
-    ic_cdk::println!("The user has sent {:?} susd-sats", amt);
+    res.push(
+        block_index_susd.0.to_u64()
+        .ok_or_else(|| UpdateBalanceError::CallError{
+            method: "syron_payment".to_string(),
+            reason: "Block index too large for u64".to_string()
+        })?
+    );
+    ic_cdk::println!("@syron_payment: The user has sent {:?} susd-sats", amt);
     
     Ok(res)
 }
@@ -1201,8 +1327,8 @@ pub async fn syron_payment_icp(sender: BitcoinAddress, receiver: Account, amt: u
     // @dev Syron amount cannot be lower than 20 cents @governance
     if amt < 20_000_000 {
         return Err(UpdateBalanceError::GenericError{
-            error_code: 61,
-            error_message: format!("Syron amount ({}) is below the minimum", amt),
+            error_code: ErrorCode::InsufficientAmount as u64,
+            error_message: format!("@syron_payment_icp: Syron amount ({}) is below the minimum", amt),
         });
     }
 
@@ -1210,7 +1336,7 @@ pub async fn syron_payment_icp(sender: BitcoinAddress, receiver: Account, amt: u
     let ssi = &sender.display(network);
     
     let principal = get_siwb_principal(ssi).await?;
-    ic_cdk::println!("SIWB Internet Identity: {:?}", principal);
+    ic_cdk::println!("@syron_payment_icp: SIWB Internet Identity = {:?}", principal);
     
     let from_subaccount = Some(compute_subaccount(2, ssi));
 
@@ -1232,13 +1358,19 @@ pub async fn syron_payment_icp(sender: BitcoinAddress, receiver: Account, amt: u
         UpdateBalanceError::GenericError{
             error_code: code as u64,
             error_message: format!(
-            "Could not update the Syron transfer balance: {}",
+            "@syron_payment_icp: Could not update the Syron transfer balance: {}",
             msg)
         }
     })??;
     
-    let res = vec![block_index_susd.0.to_u64().expect("Nat does not fit into u64")];
-    ic_cdk::println!("The user has sent {:?} syron-sats to account: {:?}", amt, receiver);
+    let res = vec![
+        block_index_susd.0.to_u64()
+        .ok_or_else(|| UpdateBalanceError::SystemError{
+            method: "syron_payment_icp".to_string(),
+            reason: "Block index too large for u64".to_string()
+        })?
+    ];
+    ic_cdk::println!("@syron_payment_icp: The user has sent {:?} syron-sats to account: {:?}", amt, receiver);
     
     Ok(res)
 }

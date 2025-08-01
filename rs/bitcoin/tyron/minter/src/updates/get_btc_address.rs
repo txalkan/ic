@@ -1,5 +1,5 @@
 use crate::{
-    address::BitcoinAddress, logs::P1, state::{mutate_state, read_state, MinterState}, ECDSAPublicKey
+    address::BitcoinAddress, logs::P1, management::{get_siwb_principal, CallError}, state::{mutate_state, read_state, MinterState}, ECDSAPublicKey
 };
 use candid::{CandidType, Deserialize, Principal};
 use ic_base_types::PrincipalId;
@@ -25,7 +25,9 @@ pub enum SyronOperation {
     #[serde(rename = "liquidation")]
     Liquidation,
     #[serde(rename = "payment")]
-    Payment
+    Payment,
+    #[serde(rename = "depositsyron")]
+    DepositSyron
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -72,6 +74,16 @@ pub async fn get_btc_address(args: GetBtcAddressArgs) -> String {
 }
 
 pub async fn get_box_address(args: GetBoxAddressArgs) -> String {
+    if args.op == SyronOperation::RedeemBitcoin {
+        match get_siwb_principal(&args.ssi).await {
+            Ok(principal) => ic_cdk::println!("@get_box_address: SIWB Internet Identity = {:?}", principal),
+            Err(err) => {
+                ic_cdk::println!("@get_box_address: Error getting SIWB principal = {:?}", err);
+                return String::new()
+            }
+        }
+    }
+
     let minter = ic_cdk::id();
 
     // @dev Validate that the SSI is a valid Bitcoin address
@@ -79,11 +91,11 @@ pub async fn get_box_address(args: GetBoxAddressArgs) -> String {
     let ssi = match BitcoinAddress::parse(&args.ssi, network) {
         Ok(ssi) => {
             let addr = ssi.display(network);
-            ic_cdk::println!("Given SSI: {}; Parsed Bitcoin Address: {}", &args.ssi, addr);
+            ic_cdk::println!("@get_box_address: Given SSI = {}; Parsed Bitcoin Address = {}", &args.ssi, addr);
             addr
         },
         Err(e) => {
-            ic_cdk::trap(&format!("Invalid SSI: {e}"))
+            ic_cdk::trap(&format!("@get_box_address: Invalid SSI, error = {e}"))
         }       
     };
     
@@ -96,19 +108,13 @@ pub async fn get_box_address(args: GetBoxAddressArgs) -> String {
 
     ic_cdk::println!("Getting Box address for Account ({}) with nonce ({})...", ssi_box_account, "1");
 
-    let sdb = read_state(|s| {
+    read_state(|s| {
         ssi_account_to_p2wpkh_address_from_state(
             s,
             ssi_box_account,
             &ssi
         )
-    });
-
-    //@sdbs
-    // mutate_state(|s| {
-    //     s.ecdsa_public_key = Some(ecdsa_public_key.clone());
-    // });
-    sdb
+    })
 }
 
 /// Initializes the Minter ECDSA public key. This function must be called

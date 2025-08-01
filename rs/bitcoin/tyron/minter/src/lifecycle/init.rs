@@ -93,6 +93,11 @@ pub struct InitArgs {
     /// NOTE: this field is optional for backward compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kyt_principal: Option<CanisterId>,
+
+    /// Minimum amount of bitcoin that can be deposited
+    /// NOTE: this field is optional for backward compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_deposit: Option<u64>,
 }
 
 pub fn init(args: InitArgs) {

@@ -573,16 +573,22 @@ async fn finalize_requests() {
         }
     });
 
-    // Do not replace transactions if less than MIN_RESUBMISSION_DELAY passed since their
-    // submission. This strategy works around short-term fee spikes.
-    maybe_finalized_transactions
-        .retain(|_txid, tx| tx.submitted_at + MIN_RESUBMISSION_DELAY.as_nanos() as u64 <= now);
+    // @dev Only consider transactions for replacement if enough time has passed since their submission.
+    // This helps avoid unnecessary replacements during short-term fee spikes by ensuring that
+    // MIN_RESUBMISSION_DELAY nanoseconds have elapsed since the transaction was submitted.
+    maybe_finalized_transactions.retain(|_txid, tx| {
+        let eligible_for_replacement = tx.submitted_at + MIN_RESUBMISSION_DELAY.as_nanos() as u64 <= now;
+        // If eligible_for_replacement is true, keep the transaction in the map (it is old enough to be replaced).
+        // If false, remove it (it is too recent to consider for replacement).
+        eligible_for_replacement
+    });
 
     if maybe_finalized_transactions.is_empty() {
         // There are no transactions eligible for replacement.
         return;
     }
 
+    // @review (alpha) check sdbs
     // There are transactions that should have been finalized by now. Let's check whether the
     // Bitcoin network knows about them or they got lost in the meantime. Note that the Bitcoin
     // canister doesn't have access to the mempool, we can detect only transactions with at least
@@ -933,7 +939,6 @@ fn greedy(target: u64, available_utxos: &mut BTreeSet<Utxo>) -> Vec<Utxo> {
 //     })
 // }
 
-
 pub async fn sign_transaction(
     key_name: String,
     ecdsa_public_key: &ECDSAPublicKey,
@@ -944,7 +949,8 @@ pub async fn sign_transaction(
 
     let mut signed_inputs = Vec::with_capacity(unsigned_tx.inputs.len());
     let sighasher = tx::TxSigHasher::new(&unsigned_tx);
-    for input in &unsigned_tx.inputs {
+    
+    for (input_index, input) in unsigned_tx.inputs.iter().enumerate() {
         let outpoint = &input.previous_output;
 
         let account = output_account
@@ -953,10 +959,12 @@ pub async fn sign_transaction(
 
         // @dev get treasury address (the runes minter ssi)
         let treasury = state::read_state(|s| s.dao_addr[1].display(s.btc_network));
-  
-        let path = ssi_derivation_path(account, &treasury);
-        let pubkey = ByteBuf::from(derive_ssi_public_key(ecdsa_public_key, account, &treasury).public_key);
+        
+        let path = ssi_derivation_path(&account, &treasury);
+        let pubkey = ByteBuf::from(derive_ssi_public_key(ecdsa_public_key, &account, &treasury).public_key);
         let pkhash = tx::hash160(&pubkey);
+
+        ic_cdk::println!("DEBUG: Input {}: outpoint={:?}, account={:?}, derivation_path={:?}, pubkey_hash={:?}", input_index, outpoint, account, path, pkhash);
 
         let sighash = sighasher.sighash(input, &pkhash);
 
@@ -1063,11 +1071,31 @@ pub enum BuildTxError {
 pub fn build_unsigned_transaction(
     runes_utxos: &mut BTreeSet<Utxo>,
     sats_utxos: &mut BTreeSet<Utxo>,
-    outputs: Vec<(BitcoinAddress, Satoshi)>,
+    mut outputs: Vec<(BitcoinAddress, Satoshi)>,
     main_address: BitcoinAddress,
     fee_per_vbyte: u64,
 ) -> Result<(tx::UnsignedTransaction, state::ChangeOutput, Vec<Utxo>, Vec<Utxo>), BuildTxError> {
     assert!(!outputs.is_empty());
+
+    // @governance add dust output to treasury = 100_000_000 runes sats per user
+    let treasury_address = state::read_state(|s| s.dao_addr[1].clone());
+    
+    // @dev subtract treasury fee from each output and collect total fees
+    let treasury_fee_per_output = 50_000_000;
+    let treasury_fee_threshold = 200_000_000;
+    let mut total_treasury_fees = 0;
+    
+    // Subtract treasury fee from each output (only if amount > 200,000,000)
+    for output in outputs.iter_mut() {
+        if output.1 > treasury_fee_threshold {
+            output.1 -= treasury_fee_per_output;
+            total_treasury_fees += treasury_fee_per_output;
+        }
+    }
+    
+    // Add treasury output with sum of all fees
+    outputs.push((treasury_address, total_treasury_fees));
+    ic_cdk::println!("Output: {:?}", outputs);
 
     /// Having a sequence number lower than (0xffffffff - 1) signals the use of replacement by fee.
     /// It allows us to increase the fee of a transaction already sent to the mempool.
@@ -1177,21 +1205,28 @@ pub fn build_unsigned_transaction(
 
     let output_len = tx_outputs.len();
 
-    let runes_sats_out = ( output_len - 1 ) as u64 * 330; // @note op_return has a value of 0 btc @syron meta (330sats per rune utxo)
+    let sats_out = ( output_len - 1 ) as u64 * 330 + 546; // @note op_return has a value of 0 btc @syron meta (330sats per rune utxo)
 
     // debug_assert_eq!(
     //     tx_outputs.iter().map(|out| out.value).sum::<u64>() - minter_fee,
     //     inputs_value
     // );
 
-    ic_cdk::println!("Building txn (fee per vbyte is {:?} milisats) & runes_sats_in {:?} & runes_sats_out {:?} & inputs {:?} & outputs {:?}", fee_per_vbyte, runes_sats_in, runes_sats_out, inputs, tx_outputs);
+    ic_cdk::println!("Building txn (fee per vbyte is {:?} milisats) & runes_sats_in {:?} & runes_sats_out {:?} & inputs {:?} & outputs {:?}", fee_per_vbyte, runes_sats_in, sats_out, inputs, tx_outputs);
 
     // @dev add fee
     let mut gas_fee = 0;
     loop {
-        ic_cdk::println!("Building txn with fee {:?} (fee per vbyte is {:?} milisats) & runes_sats_in {:?} & runes_sats_out {:?} & inputs {:?} & outputs {:?}", gas_fee, fee_per_vbyte, runes_sats_in, runes_sats_out, inputs, tx_outputs);
+        ic_cdk::println!("Building txn with fee {:?} (fee per vbyte is {:?} milisats) & runes_sats_in {:?} & runes_sats_out {:?} & inputs {:?} & outputs {:?}", gas_fee, fee_per_vbyte, runes_sats_in, sats_out, inputs, tx_outputs);
         
-        let (unsigned_tx, change_output, sats_selected_utxos) = match build_unsigned_txn(main_address.clone(), runes_sats_in, runes_sats_out, inputs.clone(), tx_outputs.clone(), gas_fee, sats_utxos.clone()) {
+        let (unsigned_tx, change_output, sats_selected_utxos) = match build_unsigned_txn(
+            main_address.clone(),
+            runes_sats_in,
+            sats_out,
+            inputs.clone(),
+            tx_outputs.clone(),
+            gas_fee,
+            sats_utxos.clone()) {
             Ok(res) => res,
             Err(err) => {
                 ic_cdk::println!("Failed to build unsigned transaction: {:?}", err);
@@ -1263,14 +1298,14 @@ pub fn build_unsigned_transaction(
 
 fn build_unsigned_txn(
     address: BitcoinAddress, // @note runes minter address
-    runes_sats_in: u64,
-    runes_sats_out: u64,
+    runes_sats_in: u64, // @note provided by the minter (330 sats per rune utxo)
+    sats_out: u64,
     mut inputs: Vec<tx::UnsignedInput>,
     mut outputs: Vec<tx::TxOut>,
     fee: u64,
     mut sats_utxos: BTreeSet<Utxo>
 ) -> Result<(tx::UnsignedTransaction, state::ChangeOutput, Vec<Utxo>), BuildTxError> {
-    let total_sats_out = runes_sats_out + fee;
+    let total_sats_out = sats_out + fee;
 
     if runes_sats_in >= total_sats_out {
         return Err(BuildTxError::AmountTooLow);
@@ -1309,6 +1344,239 @@ fn build_unsigned_txn(
     outputs.push(TxOut {
         address,
         value
+    });
+
+    return Ok((
+        tx::UnsignedTransaction {
+            inputs: inputs.to_vec(),
+            outputs,
+            lock_time: 0,
+        },
+        change_output,
+        sats_selected_utxos
+    ));
+}
+
+pub fn build_unsigned_transaction_runes_deposit(
+    runes_utxos: &mut BTreeSet<Utxo>,
+    sats_utxos: &mut BTreeSet<Utxo>,
+    outputs: Vec<(BitcoinAddress, Satoshi)>,
+    sdb_address: BitcoinAddress,
+    fee_per_vbyte: Satoshi,
+    dao_fee: Satoshi,
+    treasury_address: BitcoinAddress
+) -> Result<(tx::UnsignedTransaction, state::ChangeOutput, Vec<Utxo>, Vec<Utxo>), BuildTxError> {
+    assert!(!outputs.is_empty());
+
+    // fetch sats utxos for sdb address from state
+    //let sdb_utxos: &mut BTreeSet<Utxo> = state::read_state(|s| s.sdb_gas_utxos.get(&sdb_address).cloned().unwrap_or_default());
+    //ic_cdk::println!("SDB {} has {} UTXOs available for gas costs", sdb_address, sdb_utxos.len());
+
+    /// Having a sequence number lower than (0xffffffff - 1) signals the use of replacement by fee.
+    /// It allows us to increase the fee of a transaction already sent to the mempool.
+    /// The rbf option is used in `resubmit_retrieve_btc`.
+    /// https://github.com/bitcoin/bips/blob/master/bip-0125.mediawiki
+    const SEQUENCE_RBF_ENABLED: u32 = 0xfffffffd;
+
+    // This guard returns the selected UTXOs back to the available_utxos set if
+    // we fail to build the transaction.
+    // For runes deposits we are consuming all UTXOs
+    let runes_utxos_guard = guard(runes_utxos.clone().into_iter().collect(), |utxos: Vec<Utxo>| {
+        for utxo in utxos {
+            runes_utxos.insert(utxo);
+        }
+    });
+
+    let runes_sats_in = runes_utxos_guard.iter().map(|u| u.value).sum::<u64>();
+
+    let inputs: Vec<tx::UnsignedInput> = runes_utxos_guard
+        .iter()
+        .map(|utxo| tx::UnsignedInput {
+            previous_output: utxo.outpoint.clone(),
+            value: utxo.value,
+            sequence: SEQUENCE_RBF_ENABLED,
+        })
+        .collect();
+
+    // @dev build outputs
+    // build runes utxos
+    // 1. syron rune id
+    let rune_id = RuneId{block: 902268, tx: 517};
+
+    // 2. syron edicts
+    let edicts: Vec<Edict> = outputs
+        .iter()
+        .enumerate()
+        .map(|(i, (_address, rune_amount))| {
+            Edict {
+                id: rune_id,
+                amount: *rune_amount as u128,
+                // @note since the op_return will be at index 0
+                // the first recipient is at vout 2 after the runes change UTXO
+                // @review there should be only 1 recipient which is the runes minter
+                output: (i + 2) as u32,
+            }
+        })
+        .collect();
+    ic_cdk::println!("Syron edicts {:?}", edicts);
+
+    // 3. syron runestone
+    let runestone = Runestone{
+        edicts,
+        etching: None,
+        mint: None,
+        pointer: Some(1) // @note runes change back to sdb (utxo worth 330 sats)
+    };
+    let runestone_script_bytes = runestone.encipher().into_bytes();
+    if runestone_script_bytes.len() > 82 { // A reasonable check
+        ic_cdk::trap("The runestone script exceeds the OP_RETURN size limit");
+    }
+    
+    // 4. build op_return
+    let op_return_address = BitcoinAddress::OpReturn(runestone_script_bytes);
+    let op_return_output = TxOut {
+        address: op_return_address,
+        value: 0, // @note op_return output must have a 0 BTC value
+    };
+
+    // 5. runes change utxo back to sdb // @review what happens when change is zero
+    let runes_change_utxo = TxOut {
+        address:  sdb_address.clone(),
+        value: 330
+    };
+
+    let mut tx_outputs: Vec<tx::TxOut> = vec![op_return_output, runes_change_utxo];
+
+    let utxo_outputs: Vec<tx::TxOut> = outputs
+        .iter()
+        .map(|(address, _value)| tx::TxOut {
+            address: address.clone(),
+            value: 330 //@note every runes utxo has a value of 330 sats
+        })
+        // .chain(vec![tx::TxOut {
+        //     address: main_address.clone(),
+        //     value: 1000// @dummy change_output.value,
+        // }])
+        .collect();
+
+    tx_outputs.extend(utxo_outputs);
+
+    let output_len = tx_outputs.len();
+
+    let runes_sats_out = ( output_len - 1 ) as u64 * 330; // @note op_return has a value of 0 btc @syron meta (330sats per rune utxo)
+
+    ic_cdk::println!("Building txn (fee per vbyte is {:?} milisats) & runes_sats_in {:?} & runes_sats_out {:?} & inputs {:?} & outputs {:?}", fee_per_vbyte, runes_sats_in, runes_sats_out, inputs, tx_outputs);
+
+    // @dev add fee
+    let mut gas_fee = 0;
+    loop {
+        ic_cdk::println!("Building txn with fee {:?} (fee per vbyte is {:?} milisats) & runes_sats_in {:?} & runes_sats_out {:?} & inputs {:?} & outputs {:?}", gas_fee, fee_per_vbyte, runes_sats_in, runes_sats_out, inputs, tx_outputs);
+        
+        let (unsigned_tx, change_output, sats_selected_utxos) = match build_unsigned_txn_runes_deposit(
+            sdb_address.clone(),
+            runes_sats_in,
+            runes_sats_out,
+            inputs.clone(),
+            tx_outputs.clone(),
+            gas_fee,
+            sats_utxos.clone(),
+            dao_fee,
+            treasury_address.clone()
+        ) {
+            Ok(res) => res,
+            Err(err) => {
+                ic_cdk::println!("Failed to build unsigned transaction: {:?}", err);
+                return Err(err);
+            }
+        };
+
+        // Sign the transaction
+        let tx_vsize = fake_sign(&unsigned_tx).vsize();
+        ic_cdk::println!("Transaction of size {:?} vB being built with a gas fee of {:?} sats & fee per vbyte: {:?} milisats)", tx_vsize, gas_fee, fee_per_vbyte);
+        
+        let required_gas = (tx_vsize as u64 * fee_per_vbyte) / 1000;
+        if  gas_fee == required_gas {
+            ic_cdk::println!("Built unsigned transaction of size {:?} vB with gas fee {:?} (fee per vbyte is: {:?} milisats) & selected sats utxos: {:?}", tx_vsize, gas_fee, fee_per_vbyte, sats_selected_utxos);
+        
+            let sats_utxos_guard = guard(sats_selected_utxos, |utxos| {
+                for utxo in utxos {
+                    sats_utxos.insert(utxo);
+                }
+            });
+            return Ok((
+                unsigned_tx,
+                change_output,
+                ScopeGuard::into_inner(runes_utxos_guard),
+                ScopeGuard::into_inner(sats_utxos_guard),
+            ))
+        } else {
+            gas_fee = required_gas;
+        }
+    }
+}
+
+fn build_unsigned_txn_runes_deposit(
+    address: BitcoinAddress, // @note txn origin address = sdb
+    runes_sats_in: u64,
+    runes_sats_out: u64,
+    mut inputs: Vec<tx::UnsignedInput>,
+    mut outputs: Vec<tx::TxOut>,
+    gas_fee: u64,
+    mut sats_utxos: BTreeSet<Utxo>,
+    mut dao_fee: Satoshi,
+    treasury_address: BitcoinAddress
+) -> Result<(tx::UnsignedTransaction, state::ChangeOutput, Vec<Utxo>), BuildTxError> {
+    let total_sats_out = runes_sats_out + gas_fee + dao_fee;
+
+    let mut sats_inputs_value= 0;
+    let mut sats_selected_utxos = Vec::new();
+    if runes_sats_in < total_sats_out {
+        let sats_diff = total_sats_out - runes_sats_in;
+        sats_selected_utxos = utxos_selection(sats_diff,&mut sats_utxos, 1);
+        if sats_selected_utxos.is_empty() {
+            return Err(BuildTxError::NotEnoughFunds);
+        }
+        let sats_utxos_guard = guard(sats_selected_utxos.clone(), |utxos| {
+            for utxo in utxos {
+                sats_utxos.insert(utxo);
+            }
+        });
+        sats_inputs_value = sats_utxos_guard.iter().map(|u| u.value).sum();
+
+        const SEQUENCE_RBF_ENABLED: u32 = 0xfffffffd;
+        inputs.extend(
+            sats_utxos_guard.iter().map(|utxo| tx::UnsignedInput {
+                previous_output: utxo.outpoint.clone(),
+                value: utxo.value,
+                sequence: SEQUENCE_RBF_ENABLED,
+            }))
+    }
+    
+    let total_sats_in = runes_sats_in + sats_inputs_value;
+
+    // @dev compute change back to sdb
+    let mut value = total_sats_in - total_sats_out;
+
+    // @dev if change value is dust (less than 330 sats) then add it to DAO fee
+    if value < 330 {
+        dao_fee += value;
+        value = 0;
+    } else {
+        outputs.push(TxOut {
+            address,
+            value
+        });
+    }
+    
+    let change_output = state::ChangeOutput {
+        vout: outputs.len() as u32,
+        value,
+    };
+
+    // @dev dao fee utxo
+    outputs.push(TxOut {
+        address: treasury_address,
+        value: dao_fee
     });
 
     return Ok((
@@ -1473,9 +1741,10 @@ pub fn timer() {
                                     ic_cdk::println!("[ProcessLogic]: Failed to check runes minter utxos: {:?}", err);
                                 }
                             };
-                        } else {
-                            ic_cdk::println!("[ProcessLogic]: No new UTXOs to check for runes minter balance.");
                         }
+                        // else {
+                        //     ic_cdk::println!("[ProcessLogic]: No new UTXOs to check for runes minter balance.");
+                        // }
                     },
                     Err(err) => {
                         ic_cdk::println!("[ProcessLogic]: Failed to check for new runes minter UTXOs: {:?}", err);

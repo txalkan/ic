@@ -32,15 +32,17 @@ pub fn add_utxos(
     mint_txid: Option<u64>,
     account: Account,
     utxos: Vec<Utxo>,
+    ssi_address: Option<String>,
 ) {
     record_event(&Event::ReceivedUtxos {
         is_runes,
         mint_txid,
         to_account: account,
         utxos: utxos.clone(),
+        ssi_address: ssi_address.clone(),
     });
 
-    state.add_utxos(is_runes, account, utxos);
+    state.add_utxos(is_runes, account, utxos, ssi_address);
 }
 
 pub fn remove_retrieve_btc_request(state: &mut MinterState, request: RetrieveBtcRequest) {

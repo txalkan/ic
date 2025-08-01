@@ -28,6 +28,9 @@ use std::collections::btree_map::Entry;
 /// The maximum number of finalized requests that we keep in the history.
 const MAX_FINALIZED_REQUESTS: usize = 100;
 
+/// Default minimum deposit amount in satoshis
+const DEFAULT_MIN_DEPOSIT: u64 = 1000; // 1000 sats = 0.00001 BTC
+
 thread_local! {
     static __STATE: RefCell<Option<MinterState>> = RefCell::default();
 }
@@ -363,6 +366,9 @@ pub struct MinterState {
     /// The set of UTXOs unused in pending transactions (for gas & output values if needed).
     pub available_sats_utxos: BTreeSet<Utxo>,
 
+    /// The set of UTXOs unused in pending transactions (for SSI user collateral).
+    pub available_ssi_utxos: BTreeSet<Utxo>,
+
     /// The mapping from output points to the ledger accounts to which they
     /// belong.
     pub outpoint_account: BTreeMap<OutPoint, Account>,
@@ -395,6 +401,9 @@ pub struct MinterState {
     /// The fee for a single KYT request.
     pub kyt_fee: u64,
 
+    // @review upgrade state - dao
+    pub min_btc_deposit: u64,
+
     /// The total amount of fees we owe to the KYT provider.
     pub owed_kyt_amount: BTreeMap<Principal, u64>,
 
@@ -413,6 +422,7 @@ pub struct MinterState {
 
     /// Map from burn block index to the the reimbursed request.
     pub reimbursed_transactions: BTreeMap<u64, ReimbursedDeposit>,
+
 }
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -455,6 +465,7 @@ impl MinterState {
             mode,
             kyt_fee,
             kyt_principal,
+            min_deposit,
         }: InitArgs,
     ) {
         self.btc_network = btc_network.into();
@@ -473,6 +484,9 @@ impl MinterState {
         if let Some(min_confirmations) = min_confirmations {
             self.min_confirmations = min_confirmations;
         }
+        if let Some(min_deposit) = min_deposit {
+            self.min_btc_deposit = min_deposit;
+        }
     }
 
     pub fn upgrade(
@@ -484,6 +498,7 @@ impl MinterState {
             mode,
             kyt_principal,
             kyt_fee,
+            min_deposit,
         }: UpgradeArgs,
     ) {
         if let Some(retrieve_btc_min_amount) = retrieve_btc_min_amount {
@@ -496,8 +511,7 @@ impl MinterState {
             if min_conf < self.min_confirmations {
                 self.min_confirmations = min_conf;
             } else {
-                log!(
-                    P0,
+                ic_cdk::println!(
                     "Didn't increase min_confirmations to {} (current value: {})",
                     min_conf,
                     self.min_confirmations
@@ -512,6 +526,9 @@ impl MinterState {
         }
         if let Some(kyt_fee) = kyt_fee {
             self.kyt_fee = kyt_fee;
+        }
+        if let Some(min_deposit) = min_deposit {
+            self.min_btc_deposit = min_deposit;
         }
     }
 
@@ -628,24 +645,45 @@ impl MinterState {
     }
 
     // public for only for tests
-    pub(crate) fn add_utxos(&mut self, is_runes: bool, account: Account, utxos: Vec<Utxo>) {
+    pub(crate) fn add_utxos(&mut self, is_runes: bool, account: Account, utxos: Vec<Utxo>, ssi_address: Option<String>) {
         if utxos.is_empty() {
             return;
         }
 
-        self.tokens_minted += utxos.iter().map(|u| u.value).sum::<u64>();
+        // Check if this is the specific minter account before any mutable borrows
+        let is_minter = self.is_minter_account(&account);
 
         let account_bucket = self.utxos_state_addresses.entry(account).or_default();
 
         for utxo in utxos {
+            // Debug: Print each UTXO being added
+            ic_cdk::println!("DEBUG: Adding UTXO: outpoint={:?}, value={}, account={:?}", utxo.outpoint, utxo.value, account);
+            
             self.outpoint_account.insert(utxo.outpoint.clone(), account);
 
-            if is_runes {
-                self.available_utxos.insert(utxo.clone());
-            } else {
-                self.available_sats_utxos.insert(utxo.clone());
+            match &ssi_address {
+                Some(address) => {
+                    // SSI UTXOs go to available_ssi_utxos for potential liquidations
+                    self.available_ssi_utxos.insert(utxo.clone());
+                }
+                None => {
+                    if is_runes {
+                        // Minter runes UTXOs go to available_utxos
+                        self.available_utxos.insert(utxo.clone());
+                    } else {
+                        self.tokens_minted += utxo.clone().value;   
+
+                        if is_minter {
+                            // This is the minter's specific account - use available_sats_utxos
+                            self.available_sats_utxos.insert(utxo.clone());
+                        } else {
+                            // This is a user's SSI account - use available_ssi_utxos for collateral
+                            self.available_ssi_utxos.insert(utxo.clone());
+                        }
+                    }
+                }
             }
-            
+
             self.checked_utxos.remove(&utxo);
             account_bucket.insert(utxo);
         }
@@ -1050,6 +1088,10 @@ impl MinterState {
     pub fn new_utxos_for_account(&self, mut utxos: Vec<Utxo>, account: &Account) -> Vec<Utxo> {
         let maybe_existing_utxos = self.utxos_state_addresses.get(account);
         let maybe_finalized_utxos = self.finalized_utxos.get(&account);
+        
+        // Determine which UTXO pool to check based on account type
+        let is_minter_account = self.is_minter_account(account);
+        
         utxos.retain(|utxo| {
             !maybe_existing_utxos
                 .map(|utxos| utxos.contains(utxo))
@@ -1057,10 +1099,33 @@ impl MinterState {
                 && !maybe_finalized_utxos
                     .map(|utxos| utxos.contains(utxo))
                     .unwrap_or(false)
-                && !self.ignored_utxos.contains(utxo)
                 && !self.quarantined_utxos.contains(utxo)
+                && if is_minter_account {
+                    // For minter accounts, check against minter UTXO pools
+                    !self.available_utxos.contains(utxo)
+                        && !self.available_sats_utxos.contains(utxo)
+                } else {
+                    // For SSI accounts, check against SSI UTXO pool
+                    !self.available_ssi_utxos.contains(utxo)
+                }
         });
         utxos
+    }
+
+    /// Checks if the given account is the specific minter account (computed with nonce 1 and treasury address as SSI)
+    fn is_minter_account(&self, account: &Account) -> bool {
+        if account.owner != ic_cdk::id() {
+            return false;
+        }
+        
+        // The minter account must have a specific subaccount computed with nonce 1 and treasury address as SSI
+        if let Some(subaccount) = account.subaccount {
+            let treasury_addr = self.dao_addr[1].display(self.btc_network);
+            let expected_subaccount = crate::updates::get_withdrawal_account::compute_subaccount(1, &treasury_addr);
+            return subaccount == expected_subaccount;
+        }
+        
+        false
     }
 
     /// Adds given UTXO to the set of ignored UTXOs.
@@ -1186,6 +1251,16 @@ impl MinterState {
             "available_utxos do not match"
         );
         ensure_eq!(
+            self.available_sats_utxos,
+            other.available_sats_utxos,
+            "available_sats_utxos do not match"
+        );
+        ensure_eq!(
+            self.available_ssi_utxos,
+            other.available_ssi_utxos,
+            "available_ssi_utxos do not match"
+        );
+        ensure_eq!(
             self.utxos_state_addresses,
             other.utxos_state_addresses,
             "utxos_state_addresses do not match"
@@ -1306,6 +1381,7 @@ impl From<InitArgs> for MinterState {
             kyt_principal: args.kyt_principal,
             available_utxos: Default::default(),
             available_sats_utxos: Default::default(),
+            available_ssi_utxos: Default::default(),
             outpoint_account: Default::default(),
             utxos_state_addresses: Default::default(),
             finalized_utxos: Default::default(),
@@ -1322,6 +1398,9 @@ impl From<InitArgs> for MinterState {
             quarantined_utxos: Default::default(),
             pending_reimbursements: Default::default(),
             reimbursed_transactions: Default::default(),
+            min_btc_deposit: args
+                .min_deposit
+                .unwrap_or(DEFAULT_MIN_DEPOSIT),
         }
     }
 }

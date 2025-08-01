@@ -7,6 +7,7 @@ use crate::management::fetch_withdrawal_alerts;
 //use crate::memo::{BurnMemo, Status};
 // use crate::state::ReimbursementReason;
 use crate::tasks::{schedule_now, TaskType};
+use crate::updates::UpdateBalanceError;
 use crate::{
     address::{
         // account_to_bitcoin_address, 
@@ -219,7 +220,13 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs, minter_nonce: u64, ssi_nonce: u
     // @dev get guard for the account
     let _guard = retrieve_btc_guard(ssi_account)?;
 
-    let balance = balance_of(SyronLedger::SYRON, ssi, 2).await?;
+    let balance = match balance_of(SyronLedger::SYRON, ssi, 2).await {
+        Ok(bal) => bal,
+        Err(e) =>
+            return Err(RetrieveBtcError::TemporarilyUnavailable(
+                format!("Could not read Syron balance error {:?}", e),
+            ))
+    };
     if args.amount > balance {
         return Err(RetrieveBtcError::InsufficientFunds { balance });
     }
@@ -465,7 +472,7 @@ pub async fn retrieve_btc(args: RetrieveBtcArgs, minter_nonce: u64, ssi_nonce: u
 //     }
 // }
 
-pub async fn balance_of(ledger: SyronLedger, ssi: &str, nonce: u64) -> Result<u64, RetrieveBtcError> {
+pub async fn balance_of(ledger: SyronLedger, ssi: &str, nonce: u64) -> Result<u64, UpdateBalanceError> {
     let minter = ic_cdk::id();
 
     let client = match ledger {
@@ -487,8 +494,8 @@ pub async fn balance_of(ledger: SyronLedger, ssi: &str, nonce: u64) -> Result<u6
         })
         .await
         .map_err(|(code, msg)| {
-            RetrieveBtcError::TemporarilyUnavailable(format!(
-                "cannot enqueue a balance_of request: {} (reject_code = {})",
+            UpdateBalanceError::TemporarilyUnavailable(format!(
+                "Could not enqueue a balance_of request: {} (reject_code = {})",
                 msg, code
             ))
         })?;
