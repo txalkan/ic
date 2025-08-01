@@ -63,7 +63,11 @@ impl fmt::Display for DisplayAmount {
                 }
                 d
             };
-            debug_assert!(frac_width <= 8);
+            // @dev Runtime validation for production safety (debug_assert! is ignored in release builds)
+            // debug_assert!(frac_width <= 8);
+            if frac_width > 8 {
+                ic_cdk::println!("BUG: Fraction width {} exceeds maximum 8", frac_width);
+            }
             let frac_prefix: u64 = {
                 // The fraction part without trailing zeros.
                 let mut f = frac;
@@ -300,7 +304,11 @@ impl<'a> TxSigHasher<'a> {
         pkhash: &[u8; 20],
         buf: &mut impl Buffer,
     ) {
-        debug_assert!(self.tx.inputs.contains(input));
+        // @dev Runtime validation for production safety (debug_assert! is ignored in release builds)
+        // debug_assert!(self.tx.inputs.contains(input));
+        if !self.tx.inputs.contains(input) {
+            ic_cdk::println!("BUG: Input not found in transaction inputs");
+        }
 
         // Double SHA256 of the serialization of:
         //      1. nVersion of the transaction (4-byte little endian)

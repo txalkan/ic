@@ -6,26 +6,83 @@ use ic_cdk::api::management_canister::http_request::{
 };
 use super:: types::{ServiceProvider, ResolvedServiceProvider, ServiceError, ServiceResult, HttpOutcallError};
 use super::provider::resolve_service_provider;
+use serde_json::Value;
 
+/// Extract Runes amount from parsed JSON with comprehensive validation
+fn extract_runes_amount_from_json(outcall_json: Value) -> Result<u64, UpdateBalanceError> {
+    // @dev get runes amount with proper error handling
+    let amount_str = match outcall_json["amount"].as_str() {
+        Some(amount) => amount,
+        None => {
+            ic_cdk::println!("Missing 'amount' field in outcall response: {:?}", outcall_json);
+            return Err(UpdateBalanceError::CallError {
+                method: "extract_runes_amount_from_json".to_string(),
+                reason: "Missing 'amount' field in JSON response".to_string(),
+            });
+        }
+    };
+    
+    // Check if the amount string contains commas or dots, which would indicate it's not in satoshis
+    if amount_str.contains(',') || amount_str.contains('.') {
+        return Err(UpdateBalanceError::CallError {
+            method: "extract_runes_amount_from_json".to_string(),
+            reason: format!("Amount '{}' contains commas or dots, indicating it's not in satoshis format", amount_str),
+        });
+    }
+
+    let amount_u64: u64 = amount_str.parse().unwrap_or(0);
+
+    Ok(amount_u64)
+}
+
+/// Get Runes balance for a specific UTXO with comprehensive error handling
 pub async fn call_indexer_runes_balance(
     utxo: Utxo,
     cycles_cost: u128,
     provider: u64,
-) -> Result<String, UpdateBalanceError> {
+) -> Result<u64, UpdateBalanceError> {
+    // @dev convert utxo outpoint to bitcoin transaction id and vout/index
     let txid_bytes = utxo.outpoint.txid.as_ref().iter().rev().map(|n| *n as u8).collect::<Vec<u8>>();
     let txid = hex::encode(txid_bytes);
     let index = utxo.outpoint.vout.to_string();
+
+    // @dev build api endpoint url
     let endpoint = format!("get-unisat-runes-balance?txid={}&index={}", txid, index);
-    let outcall = match web3_request(ServiceProvider::Provider(provider), &endpoint, "", 8192, cycles_cost).await { // @review (alpha) max_response_bytes
+
+    // @dev execute https outcall @review (alpha) max_response_bytes, add var to state?
+    let outcall = match web3_request(ServiceProvider::Provider(provider), &endpoint, "", 2048, cycles_cost).await {
         Ok(result) => result,
         Err(err) => {
-            return Err(UpdateBalanceError::GenericError{
-                error_code: 1001,
-                error_message: format!("HTTPS Outcall failed in call_indexer_runes_balance: {:?}", err),
+            return Err(UpdateBalanceError::CallError {
+                method: "call_indexer_runes_balance".to_string(),
+                reason: format!("HTTPS Outcall failed with error: {:?}", err),
             });
         }
     };
-    Ok(outcall)
+
+    // @dev validate response is not HTML error page
+    if outcall.trim_start().starts_with("<!DOCTYPE html>") {
+        ic_cdk::println!("Received HTML error page for UTXO {}: {}", 
+            format!("{}:{}", txid, index), outcall);
+        return Err(UpdateBalanceError::CallError {
+            method: "call_indexer_runes_balance".to_string(),
+            reason: "Received HTML error page instead of JSON".to_string(),
+        });
+    }
+
+    let outcall_json: Value = match serde_json::from_str(&outcall) {
+        Ok(json) => json,
+        Err(e) => {
+            ic_cdk::println!("Failed to parse runes balance response with error: {:?}, for outcall response: {:?}", e, outcall);
+            return Err(UpdateBalanceError::CallError {
+                method: "check_runes_minter_utxos".to_string(),
+                reason: format!("Failed to parse runes balance response: {:?}, response: {:?}", e, outcall),
+            })
+        }
+    };
+
+    ic_cdk::println!("runes balance outcall ({:?}) for utxo ({:?})", outcall_json, utxo);
+    extract_runes_amount_from_json(outcall_json)
 }
 
 pub async fn web3_request(

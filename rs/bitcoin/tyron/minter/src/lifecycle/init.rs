@@ -59,6 +59,9 @@ pub struct InitArgs {
     /// Minimum amount of bitcoin that can be retrieved
     pub retrieve_btc_min_amount: u64,
 
+    /// The CanisterId of the Bitcoin canister
+    pub bitcoin_id: CanisterId,
+
     /// The CanisterId of the Syron Ledger for BTC
     pub ledger_id: CanisterId,
 
@@ -93,6 +96,11 @@ pub struct InitArgs {
     /// NOTE: this field is optional for backward compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kyt_principal: Option<CanisterId>,
+
+    /// Minimum amount of bitcoin that can be deposited
+    /// NOTE: this field is optional for backward compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_deposit: Option<u64>,
 }
 
 pub fn init(args: InitArgs) {

@@ -32,6 +32,10 @@ pub struct UpgradeArgs {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kyt_principal: Option<CanisterId>,
+
+    /// Minimum amount of bitcoin that can be deposited
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_deposit: Option<u64>,
 }
 
 pub fn post_upgrade(upgrade_args: Option<UpgradeArgs>) {

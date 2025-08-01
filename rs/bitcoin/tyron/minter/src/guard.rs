@@ -142,6 +142,7 @@ mod tests {
             btc_network: BtcNetwork::Regtest,
             ecdsa_key_name: "some_key".to_string(),
             retrieve_btc_min_amount: 2000,
+            bitcoin_id: CanisterId::from_u64(42),
             ledger_id: CanisterId::from_u64(42),
             susd_id: CanisterId::from_u64(42),
             xrc_id: CanisterId::from_u64(42),
@@ -151,6 +152,7 @@ mod tests {
             mode: crate::state::Mode::GeneralAvailability,
             kyt_principal: Some(CanisterId::from(0)),
             kyt_fee: None,
+            min_deposit: None,
         }
     }
 

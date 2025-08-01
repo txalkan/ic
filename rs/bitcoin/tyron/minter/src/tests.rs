@@ -240,6 +240,7 @@ fn should_have_same_input_and_output_count() {
         vec![(out1_addr.clone(), 100_000), (out2_addr.clone(), 99_999)],
         minter_addr.clone(),
         fee_per_vbyte,
+        BitcoinAddress::P2wpkhV0([3; 20]), // Add treasury_address parameter
     )
     .expect("failed to build a transaction");
 
@@ -288,6 +289,7 @@ fn test_min_change_amount() {
         vec![(out1_addr.clone(), 100_000), (out2_addr.clone(), 99_999)],
         minter_addr.clone(),
         fee_per_vbyte,
+        BitcoinAddress::P2wpkhV0([3; 20]), // Add treasury_address parameter
     )
     .expect("failed to build a transaction");
 
@@ -348,6 +350,7 @@ fn test_no_dust_outputs() {
             vec![(out1_addr.clone(), 99_900), (out2_addr.clone(), 100)],
             minter_addr.clone(),
             fee_per_vbyte,
+            BitcoinAddress::P2wpkhV0([3; 20]), // Add treasury_address parameter
         ),
         Err(BuildTxError::DustOutput {
             address: out2_addr.clone(),
@@ -363,6 +366,7 @@ fn test_no_dust_outputs() {
             vec![(out1_addr, 99_000), (out2_addr.clone(), 1000)],
             minter_addr,
             fee_per_vbyte,
+            BitcoinAddress::P2wpkhV0([3; 20]), // Add treasury_address parameter
         ),
         Err(BuildTxError::DustOutput {
             address: out2_addr,

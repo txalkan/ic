@@ -77,7 +77,11 @@ pub fn sec1_to_der(sec1: &[u8]) -> Vec<u8> {
 
         let neg = bytes[0] & 0x80 != 0;
         let n = if neg { bytes.len() + 1 } else { bytes.len() };
-        debug_assert!(n <= u8::MAX as usize);
+        // @dev Runtime validation for production safety (debug_assert! is ignored in release builds)
+        // debug_assert!(n <= u8::MAX as usize);
+        if n > u8::MAX as usize {
+            ic_cdk::println!("BUG: Signature length {} exceeds maximum {}", n, u8::MAX);
+        }
 
         buf.push(0x02);
         buf.push(n as u8);

@@ -219,6 +219,69 @@ pub async fn get_utxos(
     Ok(response)
 }
 
+/// Fetches the full list of UTXOs for the specified address for free
+pub async fn get_utxos_query(
+    network: Network,
+    address: &Address,
+    min_confirmations: u32,
+    source: CallSource,
+) -> Result<GetUtxosResponse, CallError> {
+    // Calls "bitcoin_get_utxos_query" method directly on the Bitcoin canister
+    async fn bitcoin_get_utxos_query(
+        req: &GetUtxosRequest,
+        source: CallSource,
+    ) -> Result<GetUtxosResponse, CallError> {
+        match source {
+            CallSource::Client => &crate::metrics::GET_UTXOS_CLIENT_CALLS,
+            CallSource::Minter => &crate::metrics::GET_UTXOS_MINTER_CALLS,
+        }
+        .with(|cell| cell.set(cell.get() + 1));
+        
+        // Use the same pattern as XRC and SIWB calls - call Bitcoin canister directly
+        let (res,): (GetUtxosResponse,) = ic_cdk::api::call::call(
+            read_state(|s| s.bitcoin_id.get().into()),
+            "bitcoin_get_utxos_query",  // Method name on the Bitcoin canister
+            (req,),       // Arguments
+        )
+        .await
+        .map_err(|(code, msg)| CallError {
+            method: "bitcoin_get_utxos_query    ".to_string(),
+            reason: Reason::from_reject(code, msg),
+        })?;
+        
+        Ok(res)
+    }
+
+    let mut response = bitcoin_get_utxos_query(
+        &GetUtxosRequest {
+            address: address.to_string(),
+            network: network.into(),
+            filter: Some(UtxosFilterInRequest::MinConfirmations(min_confirmations)),
+        },
+        source,
+    ).await?;
+
+    let mut utxos = std::mem::take(&mut response.utxos);
+
+    // Continue fetching until there are no more pages.
+    while let Some(page) = response.next_page {
+        response = bitcoin_get_utxos_query(
+            &GetUtxosRequest {
+                address: address.to_string(),
+                network: network.into(),
+                filter: Some(UtxosFilterInRequest::Page(page)),
+            },
+            source,
+        ).await?;
+
+        utxos.append(&mut response.utxos);
+    }
+
+    response.utxos = utxos;
+
+    Ok(response)
+}
+
 /// Returns the current fee percentiles on the bitcoin network.
 pub async fn get_current_fees(network: Network) -> Result<Vec<MillisatoshiPerByte>, CallError> {
     let cost_cycles = match network {
