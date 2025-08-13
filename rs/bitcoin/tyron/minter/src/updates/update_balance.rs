@@ -1,13 +1,17 @@
 use crate::address::BitcoinAddress;
+use crate::tx::UnsignedTransaction;
+use crate::{estimate_fee_per_vbyte, fake_sign, signature, tx};
 use crate::logs::{P0, P1};
-use crate::management::{fetch_btc_exchange_rate, get_siwb_principal};
+use crate::management::{self, fetch_btc_exchange_rate, get_siwb_principal};
 use crate::memo::MintMemo;
+use crate::runes::check_runes_and_sats_utxos;
 use crate::state::{mutate_state, read_state, UtxoCheckStatus};
 use crate::tasks::{schedule_now, TaskType};
 use candid::{CandidType, Deserialize, Nat, Principal};
 use ic_btc_interface::{GetUtxosError, GetUtxosResponse, OutPoint, Utxo};
 use ic_canister_log::log;
 use ic_ckbtc_kyt::Error as KytError;
+use ic_management_canister_types::DerivationPath;
 use ic_xrc_types::ExchangeRateError;
 use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
 use icrc_ledger_types::icrc1::{
@@ -15,7 +19,10 @@ use icrc_ledger_types::icrc1::{
     transfer::{Memo, TransferArg, TransferError}
 };
 use num_traits::ToPrimitive;
+use ordinals::{Edict, RuneId, Runestone};
+use scopeguard::guard;
 use serde::Serialize;
+use serde_bytes::ByteBuf;
 use super::get_btc_address::{GetBoxAddressArgs, SyronOperation};
 use super::get_withdrawal_account::compute_subaccount;
 use super::retrieve_btc::{balance_of, SyronLedger};
@@ -23,7 +30,7 @@ use crate::{
     guard::{balance_update_guard, GuardError},
     management::{fetch_utxo_alerts, get_utxos, CallError, CallSource},
     state,
-    tx::{DisplayAmount, DisplayOutpoint},
+    tx::{DisplayAmount, DisplayOutpoint, TxOut, UnsignedInput},
     updates::get_btc_address,
 };
 
@@ -1373,4 +1380,229 @@ pub async fn syron_payment_icp(sender: BitcoinAddress, receiver: Account, amt: u
     ic_cdk::println!("@syron_payment_icp: The user has sent {:?} syron-sats to account: {:?}", amt, receiver);
     
     Ok(res)
+}
+
+pub async fn withdraw_treasury_fees() -> Result<(Vec<Utxo>, Vec<Utxo>), UpdateBalanceError> {
+    let (treasury_addr, treasury_withdrawal_address, network, min_confirmations) = read_state(|s| (s.dao_addr[1].display(s.btc_network), s.treasury_withdrawal_address.clone(), s.btc_network, s.min_confirmations));
+
+    let treasury_utxos: Vec<Utxo> = match management::get_utxos(network, &treasury_addr, min_confirmations, management::CallSource::Client).await {
+        Ok(response) => response.utxos,
+        Err(e) => {
+            ic_cdk::println!("Failed to get Treasury UTXOs from Bitcoin Canister: {:?}", e);
+            return Err(UpdateBalanceError::SystemError {
+                method: "withdraw_treasury_fees".to_string(),
+                reason: format!("Failed to get UTXOs: {:?}", e),
+            });
+        }
+    };
+
+    let (sats_utxos, runes_utxos) = check_runes_and_sats_utxos(treasury_utxos).await?;
+    // @dev if any of the utxos are empty, return an error
+    if sats_utxos.is_empty() || runes_utxos.is_empty() {
+        return Err(UpdateBalanceError::CallError {
+            method: "withdraw_treasury_fees".to_string(),
+            reason: format!("UTXOs cannot be empty: Sats UTXOs: {:?}, Runes UTXOs: {:?}", sats_utxos, runes_utxos),
+        });
+    }
+    
+    let total_sats_value_btc = sats_utxos.iter().map(|u| u.value).sum::<u64>();
+    let total_runes_value_btc = runes_utxos.iter().map(|u| u.value).sum::<u64>();
+    let total_value_btc = total_sats_value_btc + total_runes_value_btc;
+    ic_cdk::println!("Total BTC in Sats UTXOs: {:?}", total_sats_value_btc);
+    ic_cdk::println!("Total BTC in Runes UTXOs: {:?}", total_runes_value_btc);
+
+    /// Having a sequence number lower than (0xffffffff - 1) signals the use of replacement by fee.
+    /// It allows us to increase the fee of a transaction already sent to the mempool.
+    /// The rbf option is used in `resubmit_retrieve_btc`.
+    /// https://github.com/bitcoin/bips/blob/master/bip-0125.mediawiki
+    const SEQUENCE_RBF_ENABLED: u32 = 0xfffffffd;
+
+    let mut inputs: Vec<tx::UnsignedInput> = runes_utxos
+        .iter()
+        .map(|utxo| tx::UnsignedInput {
+            previous_output: utxo.outpoint.clone(),
+            value: utxo.value,
+            sequence: SEQUENCE_RBF_ENABLED,
+        })
+        .collect();
+
+    // @dev add sats utxos to inputs
+    inputs.extend(sats_utxos.iter().map(|utxo| tx::UnsignedInput {
+        previous_output: utxo.outpoint.clone(),
+        value: utxo.value,
+        sequence: SEQUENCE_RBF_ENABLED,
+    }));
+
+    // @dev build outputs @review (alpha)
+    // build runes utxos
+    // 1. syron rune id
+    let rune_id = RuneId{block: 902268, tx: 517};
+
+    // 2. syron edict
+    let edicts: Vec<Edict> = [
+        Edict {
+            id: rune_id,
+            amount: 0, // @note send all runes to treasury
+            output: 1, // @note since the op_return will be at index 0
+        }
+    ].to_vec();
+
+    ic_cdk::println!("Syron edicts {:?}", edicts);
+
+    // 3. syron runestone
+    let runestone = Runestone{
+        edicts,
+        etching: None,
+        mint: None,
+        pointer: None
+    };
+    let runestone_script_bytes = runestone.encipher().into_bytes();
+    if runestone_script_bytes.len() > 82 { // A reasonable check
+        ic_cdk::trap("The runestone script exceeds the OP_RETURN size limit");
+    }
+    
+    // 4. build op_return
+    let op_return_address = BitcoinAddress::OpReturn(runestone_script_bytes);
+    let op_return_output = TxOut {
+        address: op_return_address,
+        value: 0, // @note op_return output must have a 0 BTC value
+    };
+
+    // 5. runes change utxo back to minter
+    let runes_utxo = TxOut {
+        address:  treasury_withdrawal_address.clone(),
+        value: 330
+    };
+    let tx_outputs: Vec<TxOut> = vec![op_return_output, runes_utxo];
+
+    let fee_per_vbyte = estimate_fee_per_vbyte().await.unwrap_or(2000);
+
+    // @dev add fee
+    let mut gas_fee = 0;
+
+    let unsigned_transaction: UnsignedTransaction;
+    loop {
+        ic_cdk::println!("Building withdrawal with fee {:?} (fee per vbyte is {:?} milisats)", gas_fee, fee_per_vbyte);
+        
+        let outputs = match build_unsigned_withdrawal_with_fees(
+            treasury_withdrawal_address.clone(),
+            gas_fee,
+            total_value_btc,
+            tx_outputs.clone()
+        ) {
+            Ok(res) => res,
+            Err(err) => {
+                ic_cdk::println!("Failed to build unsigned withdrawal transaction: {:?}", err);
+                return Err(err);
+            }
+        };
+
+        let unsigned_tx = tx::UnsignedTransaction {
+            inputs: inputs.to_vec(),
+            outputs,
+            lock_time: 0,
+        };
+
+        // Sign the transaction
+        let tx_vsize = fake_sign(&unsigned_tx).vsize();
+        ic_cdk::println!("Transaction of size {:?} vB being built with a gas fee of {:?} sats & fee per vbyte: {:?} milisats)", tx_vsize, gas_fee, fee_per_vbyte);
+        
+        let required_gas = (tx_vsize as u64 * fee_per_vbyte) / 1000;
+        if  gas_fee == required_gas {
+            ic_cdk::println!("Built unsigned transaction of size {:?} vB with gas fee {:?} (fee per vbyte is: {:?} milisats) & tx_outputs: {:?}", tx_vsize, gas_fee, fee_per_vbyte, tx_outputs);
+            unsigned_transaction = unsigned_tx;
+            break;
+        } else {
+            gas_fee = required_gas;
+        }
+    }
+
+    let txid = unsigned_transaction.txid();
+    match sign_treasury_withdrawal_transaction(unsigned_transaction).await {
+        Ok(signed_tx) => {
+            ic_cdk::println!(
+                "[submit_treasury_withdrawal_request]: sending a signed transaction {}",
+                hex::encode(tx::encode_into(&signed_tx, Vec::new()))
+            );
+
+            match management::send_transaction(&signed_tx, network).await {
+                Ok(()) => {
+                    ic_cdk::println!(
+                        "[submit_treasury_withdrawal_request]: successfully sent transaction {}",
+                        &txid,
+                    )
+                }
+                Err(err) => {
+                    ic_cdk::println!("[submit_treasury_withdrawal_request]: failed to send a bitcoin transaction: {:?}", err);
+                }
+            }
+        }
+        Err(err) => {
+            ic_cdk::println!("[submit_treasury_withdrawal_request]: failed to sign a BTC transaction: {:?}", err);
+        }
+    }
+
+    Ok((sats_utxos, runes_utxos))
+}
+
+fn build_unsigned_withdrawal_with_fees(treasury_withdrawal_address: BitcoinAddress, fee: u64, total_value_btc: u64, mut outputs: Vec<TxOut>) -> Result<Vec<TxOut>, UpdateBalanceError> {
+    let minimum_sats_out = 330 + fee;
+    if total_value_btc < minimum_sats_out {
+        return Err(UpdateBalanceError::CallError {
+            method: "build_unsigned_withdrawal_with_fees".to_string(),
+            reason: format!("Total value BTC ({}) is less than the minimum required ({})", total_value_btc, minimum_sats_out),
+        });
+    }
+    
+    let total_sats_out = total_value_btc - minimum_sats_out;
+
+    outputs.push(TxOut {
+        address: treasury_withdrawal_address,
+        value: total_sats_out
+    });
+
+    Ok(outputs)
+}
+
+pub async fn sign_treasury_withdrawal_transaction(unsigned_tx: UnsignedTransaction) -> Result<tx::SignedTransaction, management::CallError> {
+    use crate::address::{ssi_derivation_path, derive_ssi_public_key};
+
+    let (minter_addr, key_name, ecdsa_public_key) = read_state(|s| (s.dao_addr[0].display(s.btc_network), s.ecdsa_key_name.clone(), s.ecdsa_public_key.clone().expect("ECDSAPublicKey is None")));
+
+    let mut signed_inputs = Vec::with_capacity(unsigned_tx.inputs.len());
+    let sighasher = tx::TxSigHasher::new(&unsigned_tx);
+    
+    for input in unsigned_tx.inputs.iter() {
+        let outpoint = &input.previous_output;
+
+        let account = Account {
+            owner: ic_cdk::id(),
+            subaccount: Some(compute_subaccount(1, &minter_addr))
+        };
+
+        let path = ssi_derivation_path(&account, &minter_addr);
+        let pubkey = ByteBuf::from(derive_ssi_public_key(&ecdsa_public_key, &account, &minter_addr).public_key);
+        let pkhash = tx::hash160(&pubkey);
+
+        let sighash = sighasher.sighash(input, &pkhash);
+
+        let sec1_signature = management::sign_with_ecdsa(
+            key_name.clone(),
+            DerivationPath::new(path),
+            sighash,
+        )
+        .await?;
+
+        signed_inputs.push(tx::SignedInput {
+            signature: signature::EncodedSignature::from_sec1(&sec1_signature),
+            pubkey,
+            previous_output: outpoint.clone(),
+            sequence: input.sequence,
+        });
+    }
+    Ok(tx::SignedTransaction {
+        inputs: signed_inputs,
+        outputs: unsigned_tx.outputs,
+        lock_time: unsigned_tx.lock_time,
+    })
 }

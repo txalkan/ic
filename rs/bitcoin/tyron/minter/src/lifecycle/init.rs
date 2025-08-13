@@ -101,6 +101,9 @@ pub struct InitArgs {
     /// NOTE: this field is optional for backward compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_deposit: Option<u64>,
+
+    /// The Bitcoin address where treasury fees are sent for withdrawal (as string)
+    pub treasury_withdrawal_address: String,
 }
 
 pub fn init(args: InitArgs) {

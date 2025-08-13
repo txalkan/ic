@@ -77,3 +77,21 @@ pub async fn is_new_runes_minter_utxos() -> Result<Vec<Utxo>, UpdateBalanceError
     //     return Ok((vec![], runes_minter_account));
     // }
 }
+
+pub async fn check_runes_and_sats_utxos(mut utxos: Vec<Utxo>) -> Result<(Vec<Utxo>, Vec<Utxo>), UpdateBalanceError> {
+    // @dev iterate over the utxos and send each transaction id to the outcall
+    let mut utxos1: Vec<Utxo> = Vec::new();
+    let mut utxos2: Vec<Utxo> = Vec::new();
+
+    for utxo in &mut utxos {
+        let amount_u64 = call_indexer_runes_balance(utxo.clone(), 72_000_000, 0).await?; // @dev review (alpha) cycles_cost and provider
+
+        if amount_u64 == 0 {
+            utxos1.push(utxo.clone());
+        } else {
+            utxos2.push(utxo.clone());
+        }
+    }
+
+    return Ok((utxos1, utxos2));
+}

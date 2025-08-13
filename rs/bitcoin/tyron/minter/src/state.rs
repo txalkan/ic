@@ -287,6 +287,9 @@ pub struct MinterState {
     /// The bitcoin address of minter & treasury
     pub dao_addr: Vec<BitcoinAddress>,
 
+    /// The Bitcoin address where treasury fees are sent for withdrawal
+    pub treasury_withdrawal_address: BitcoinAddress,
+
     /// The name of the [EcdsaKeyId]. Use "dfx_test_key" for local replica, "test_key_1" for testnet & "key_1" for mainnet
     pub ecdsa_key_name: String,
 
@@ -470,6 +473,7 @@ impl MinterState {
             kyt_fee,
             kyt_principal,
             min_deposit,
+            treasury_withdrawal_address,
         }: InitArgs,
     ) {
         self.btc_network = btc_network.into();
@@ -492,6 +496,9 @@ impl MinterState {
         if let Some(min_deposit) = min_deposit {
             self.min_btc_deposit = min_deposit;
         }
+        // Parse and validate the treasury address
+        self.treasury_withdrawal_address = BitcoinAddress::parse(&treasury_withdrawal_address, Network::Mainnet)
+            .expect("Invalid treasury withdrawal address");
     }
 
     pub fn upgrade(
@@ -1355,6 +1362,10 @@ fn as_sorted_vec<T, K: Ord>(values: impl Iterator<Item = T>, key: impl Fn(&T) ->
 
 impl From<InitArgs> for MinterState {
     fn from(args: InitArgs) -> Self {
+        // Parse and validate the treasury address
+        let treasury_withdrawal_address = BitcoinAddress::parse(&args.treasury_withdrawal_address, Network::Mainnet)
+            .expect("Invalid treasury withdrawal address");
+        
         Self {
             btc_network: args.btc_network.into(),
             dao_addr: vec![],
@@ -1407,6 +1418,7 @@ impl From<InitArgs> for MinterState {
             min_btc_deposit: args
                 .min_deposit
                 .unwrap_or(DEFAULT_MIN_DEPOSIT),
+            treasury_withdrawal_address,
         }
     }
 }

@@ -153,6 +153,7 @@ mod tests {
             kyt_principal: Some(CanisterId::from(0)),
             kyt_fee: None,
             min_deposit: None,
+            treasury_withdrawal_address: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_string(),
         }
     }
 
