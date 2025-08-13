@@ -223,33 +223,27 @@ pub async fn get_utxos(
 pub async fn get_utxos_query(
     network: Network,
     address: &Address,
-    min_confirmations: u32,
-    source: CallSource,
+    min_confirmations: u32
 ) -> Result<GetUtxosResponse, CallError> {
     // Calls "bitcoin_get_utxos_query" method directly on the Bitcoin canister
     async fn bitcoin_get_utxos_query(
-        req: &GetUtxosRequest,
-        source: CallSource,
+        req: &GetUtxosRequest
     ) -> Result<GetUtxosResponse, CallError> {
-        match source {
-            CallSource::Client => &crate::metrics::GET_UTXOS_CLIENT_CALLS,
-            CallSource::Minter => &crate::metrics::GET_UTXOS_MINTER_CALLS,
-        }
-        .with(|cell| cell.set(cell.get() + 1));
-        
-        // Use the same pattern as XRC and SIWB calls - call Bitcoin canister directly
-        let (res,): (GetUtxosResponse,) = ic_cdk::api::call::call(
+        let res: Result<(GetUtxosResponse,), _> = ic_cdk::api::call::call_with_payment(
             read_state(|s| s.bitcoin_id.get().into()),
-            "bitcoin_get_utxos_query",  // Method name on the Bitcoin canister
-            (req,),       // Arguments
+            "bitcoin_get_utxos_query",
+            (req,),
+            0,
         )
-        .await
-        .map_err(|(code, msg)| CallError {
-            method: "bitcoin_get_utxos_query    ".to_string(),
-            reason: Reason::from_reject(code, msg),
-        })?;
-        
-        Ok(res)
+        .await;
+    
+        match res {
+            Ok((output,)) => Ok(output),
+            Err((code, msg)) => Err(CallError {
+                method: "bitcoin_get_utxos_query".to_string(),
+                reason: Reason::from_reject(code, msg),
+            }),
+        }
     }
 
     let mut response = bitcoin_get_utxos_query(
@@ -257,8 +251,7 @@ pub async fn get_utxos_query(
             address: address.to_string(),
             network: network.into(),
             filter: Some(UtxosFilterInRequest::MinConfirmations(min_confirmations)),
-        },
-        source,
+        }
     ).await?;
 
     let mut utxos = std::mem::take(&mut response.utxos);
@@ -270,8 +263,7 @@ pub async fn get_utxos_query(
                 address: address.to_string(),
                 network: network.into(),
                 filter: Some(UtxosFilterInRequest::Page(page)),
-            },
-            source,
+            }
         ).await?;
 
         utxos.append(&mut response.utxos);

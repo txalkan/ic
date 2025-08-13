@@ -246,6 +246,37 @@ async fn submit_pending_requests() {
         None => return,
     };
 
+    // @dev update runes minter balance on every request                
+    // @dev only outcall to check for runes if there are new UTXOs to process
+    match runes::is_new_runes_minter_utxos().await {
+        Ok(new_utxos) => {
+            if !new_utxos.is_empty() {
+                match check_runes_minter_utxos(new_utxos).await {
+                    Ok(runes_minter_utxos) => {
+                        ic_cdk::println!("[ProcessLogic]: New runes minter utxos: {:?}", runes_minter_utxos);
+                        if !runes_minter_utxos.0.is_empty() || !runes_minter_utxos.1.is_empty() {
+                            let res = update_runes_balance(runes_minter_utxos).await;
+                            ic_cdk::println!("[ProcessLogic]: Updated runes minter balance: {:?}", res);
+                        } else {
+                            ic_cdk::println!("[ProcessLogic] BUG: No new runes minter utxos to update.");
+                        }
+                    },
+                    Err(err) => {
+                        ic_cdk::println!("[ProcessLogic]: Failed to check runes minter utxos: {:?}", err);
+                        return;
+                    }
+                };
+            }
+            // else {
+            //     ic_cdk::println!("[ProcessLogic]: No new UTXOs to check for runes minter balance.");
+            // }
+        },
+        Err(err) => {
+            ic_cdk::println!("[ProcessLogic]: Failed to check for new runes minter UTXOs: {:?}", err);
+            return;
+        }
+    }
+
     let maybe_sign_request = state::mutate_state(|s| {
         let batch = s.build_batch(MAX_REQUESTS_PER_BATCH);
 
@@ -258,7 +289,6 @@ async fn submit_pending_requests() {
             .iter()
             .map(|req| (req.address.clone(), req.amount))
             .collect();
-        let mut outputs = outputs.clone(); // Clone to prevent mutation from persisting
 
         // @dev get runes minter address
         let main_address = s.dao_addr[2].clone();
@@ -1783,45 +1813,6 @@ pub fn timer() {
                     //ic_cdk::println!("[ProcessLogic]: Task finished, rescheduling for 5 seconds later.");
                 });
 
-                // @dev update runes minter balance                
-                // @dev only outcall to check for runes if there are new UTXOs to process
-                match runes::is_new_runes_minter_utxos().await {
-                    Ok((new_utxos, runes_minter_account)) => {
-                        if !new_utxos.is_empty() {
-                            // Maintain the guard throughout the entire processing
-                            let _guard = match crate::guard::balance_update_guard(runes_minter_account) {
-                                Ok(guard) => guard,
-                                Err(err) => {
-                                    ic_cdk::println!("[ProcessLogic]: Failed to acquire balance update guard for runes minter account: {:?}", err);
-                                    return; // Exit early if guard acquisition fails
-                                }
-                            };
-                            match check_runes_minter_utxos(new_utxos).await {
-                                Ok(runes_minter_utxos) => {
-                                    ic_cdk::println!("[ProcessLogic]: New runes minter utxos: {:?}", runes_minter_utxos);
-                                    if !runes_minter_utxos.0.is_empty() || !runes_minter_utxos.1.is_empty() {
-                                        let res = update_runes_balance(runes_minter_utxos).await;
-                                        ic_cdk::println!("[ProcessLogic]: Updated runes minter balance: {:?}", res);
-                                    } else {
-                                        ic_cdk::println!("[ProcessLogic] BUG: No new runes minter utxos to update.");
-                                    }
-                                },
-                                Err(err) => {
-                                    ic_cdk::println!("[ProcessLogic]: Failed to check runes minter utxos: {:?}", err);
-                                    return;
-                                }
-                            };
-                        }
-                        // else {
-                        //     ic_cdk::println!("[ProcessLogic]: No new UTXOs to check for runes minter balance.");
-                        // }
-                    },
-                    Err(err) => {
-                        ic_cdk::println!("[ProcessLogic]: Failed to check for new runes minter UTXOs: {:?}", err);
-                        return;
-                    }
-                }
-              
                 //ic_cdk::println!("[ProcessLogic]: --> Calling submit_pending_requests()...");
                 submit_pending_requests().await;
                 //ic_cdk::println!("[ProcessLogic]: <-- Finished submit_pending_requests().");

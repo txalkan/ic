@@ -27,7 +27,7 @@ pub async fn check_runes_minter_utxos(mut minter_utxos: Vec<Utxo>) -> Result<(Ve
     return Ok((utxos1, utxos2));
 }
 
-pub async fn is_new_runes_minter_utxos() -> Result<(Vec<Utxo>, Account), UpdateBalanceError> {
+pub async fn is_new_runes_minter_utxos() -> Result<Vec<Utxo>, UpdateBalanceError> {
     // @dev only check runes minter utxos if there are unregistered utxos to process
     let (treasury_addr, runes_minter, network, min_confirmations) = state::read_state(|s: &state::MinterState| (s.dao_addr[1].display(s.btc_network), s.dao_addr[2].display(s.btc_network), s.btc_network, s.min_confirmations));
     let runes_minter_account = Account {
@@ -42,22 +42,22 @@ pub async fn is_new_runes_minter_utxos() -> Result<(Vec<Utxo>, Account), UpdateB
     let _guard = balance_update_guard(runes_minter_account.clone())?;
     
     // @dev get utxos from bitcoin canister (query)
-    let utxos_response_query = match management::get_utxos_query(network, &runes_minter, min_confirmations, management::CallSource::Client).await {
-        Ok(response) => response,
-        Err(e) => {
-            ic_cdk::println!("[ProcessLogic]: Failed to get Runes Minter UTXOs from Bitcoin Canister: {:?}", e);
-            return Err(UpdateBalanceError::GenericError {
-                error_code: 1001,
-                error_message: format!("Failed to get UTXOs query: {:?}", e),
-            });
-        }
-    };
+    // let utxos_response_query = match management::get_utxos_query(network, &runes_minter, min_confirmations).await {
+    //     Ok(response) => response,
+    //     Err(e) => {
+    //         ic_cdk::println!("[ProcessLogic]: Failed to get Runes Minter UTXOs from Bitcoin Canister: {:?}", e);
+    //         return Err(UpdateBalanceError::GenericError {
+    //             error_code: 1001,
+    //             error_message: format!("Failed to get UTXOs query: {:?}", e),
+    //         });
+    //     }
+    // };
     
     // Check for new UTXOs using the existing state management
-    let new_utxos_query = state::read_state(|s| s.new_utxos_for_account(utxos_response_query.utxos, &runes_minter_account));
+    // let new_utxos_query = state::read_state(|s| s.new_utxos_for_account(utxos_response_query.utxos, &runes_minter_account));
     
     // @dev if new utxos are found, get utxos from bitcoin canister
-    if !new_utxos_query.is_empty() {
+    // if !new_utxos_query.is_empty() {
         // @dev get verified utxos from bitcoin canister
         let utxos_response = match management::get_utxos(network, &runes_minter, min_confirmations, management::CallSource::Client).await {
             Ok(response) => response,
@@ -71,9 +71,9 @@ pub async fn is_new_runes_minter_utxos() -> Result<(Vec<Utxo>, Account), UpdateB
         };
         let new_utxos = state::read_state(|s| s.new_utxos_for_account(utxos_response.utxos, &runes_minter_account));
         
-        return Ok((new_utxos, runes_minter_account));
-    } else {
-        // @dev if no new utxos are found, return an empty vector
-        return Ok((vec![], runes_minter_account));
-    }
+        return Ok(new_utxos);
+    // } else {
+    //     // @dev if no new utxos are found, return an empty vector
+    //     return Ok((vec![], runes_minter_account));
+    // }
 }
